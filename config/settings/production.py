@@ -49,5 +49,14 @@ LOGGING = {
             "level": "INFO",
             "propagate": False,
         },
+        # Without this, every logger.info in providers/ falls through to the
+        # WARNING root and is dropped: publish handles, upload outcomes and the
+        # platform's own status strings never reach the logs, which makes a
+        # publish that "succeeded but did not arrive" undiagnosable.
+        "providers": {
+            "handlers": ["console"],
+            "level": "INFO",
+            "propagate": False,
+        },
     },
 }

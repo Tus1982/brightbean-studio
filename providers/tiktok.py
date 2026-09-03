@@ -632,7 +632,17 @@ class TikTokProvider(SocialProvider):
         outage would bury a video that is sitting fine in someone's drafts.
         """
         try:
-            status = self._fetch_publish_status(access_token, publish_id).get("status")
+            payload = self._fetch_publish_status(access_token, publish_id)
+            status = payload.get("status")
+            # The raw string, not just our verdict: PROCESSING_UPLOAD and
+            # SEND_TO_USER_INBOX both mean "waiting", but only the second one
+            # means the creator can already see the draft.
+            logger.info(
+                "[TIKTOK] inbox status for %s: %s (fail_reason=%s)",
+                publish_id,
+                status,
+                payload.get("fail_reason"),
+            )
         except Exception:
             logger.warning(
                 "TikTok publish-status fetch failed for %s; leaving it waiting",
