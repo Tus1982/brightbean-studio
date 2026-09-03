@@ -22,6 +22,10 @@ _WORKFLOW_ORDER = [
     "approved",
     "scheduled",
     "publishing",
+    # Waiting on a human inside TikTok: more advanced than "publishing", but
+    # not an outcome, so it ranks below the terminal states and a mixed post
+    # surfaces as still-in-flight.
+    "awaiting_creator",
     "partially_published",
     "published",
 ]

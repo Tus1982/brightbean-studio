@@ -379,7 +379,10 @@ def _publish_tab_counts(workspace, request):
         "queue_count": _pp(status="scheduled"),
         "drafts_count": _pp(status="draft"),
         "approvals_count": approvals.distinct().count(),
-        "sent_count": _pp(status__in=["published", "failed"]),
+        # ``awaiting_creator`` (a video parked in TikTok's drafts) belongs
+        # here: it has left BrightBean, and the Sent tab is where someone looks
+        # for it. Its badge says "In TikTok drafts", not "Published".
+        "sent_count": _pp(status__in=["published", "awaiting_creator", "failed"]),
     }
 
 
@@ -525,7 +528,7 @@ def _get_tab_context(request, workspace, tab: str) -> dict:
         platform_posts = (
             PlatformPost.objects.filter(
                 post__workspace_id=workspace.id,
-                status__in=["published", "failed"],
+                status__in=["published", "awaiting_creator", "failed"],
             )
             .select_related("post__author", "social_account")
             .prefetch_related("post__media_attachments__media_asset")

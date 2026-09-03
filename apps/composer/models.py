@@ -345,6 +345,10 @@ class PlatformPost(models.Model):
         REJECTED = "rejected", "Rejected"
         SCHEDULED = "scheduled", "Scheduled"
         PUBLISHING = "publishing", "Publishing"
+        # TikTok inbox mode: the video is sitting in the creator's TikTok
+        # drafts. The upload succeeded, but nothing is live until the creator
+        # opens TikTok and publishes it, so this must never read "Published".
+        AWAITING_CREATOR = "awaiting_creator", "Awaiting creator"
         PUBLISHED = "published", "Published"
         FAILED = "failed", "Failed"
         ON_HOLD = "on_hold", "On Hold"
@@ -354,7 +358,7 @@ class PlatformPost(models.Model):
     # mid-publish row is history, and deleting it cascades away its
     # PublishLog records. Explicit deletion (the post delete action) is the
     # user's call and intentionally bypasses this.
-    PROTECTED_STATUSES = (Status.PUBLISHED, Status.PUBLISHING)
+    PROTECTED_STATUSES = (Status.PUBLISHED, Status.PUBLISHING, Status.AWAITING_CREATOR)
 
     # Statuses whose scheduled time may be changed by a calendar drag-and-drop.
     # A dropped draft/failed chip becomes ``scheduled`` (an implicit
@@ -383,7 +387,12 @@ class PlatformPost(models.Model):
         "changes_requested": {"pending_review", "draft"},
         "rejected": {"draft", "pending_review"},
         "scheduled": {"publishing", "draft"},
-        "publishing": {"published", "failed", "scheduled"},  # scheduled = retry
+        "publishing": {"published", "failed", "scheduled", "awaiting_creator"},  # scheduled = retry
+        # The video reached TikTok's drafts. Only TikTok's publish-status
+        # endpoint moves it on: PUBLISH_COMPLETE -> published, FAILED/EXPIRED
+        # -> failed. There is no edge back into the publish path, because a
+        # retry would upload the video a second time.
+        "awaiting_creator": {"published", "failed"},
         "failed": {"publishing", "draft", "scheduled"},
         # Client-requested hold: parked out of the publish path. The team resolves
         # it back to approved (resume), draft (rework), or changes_requested. There
@@ -408,6 +417,7 @@ class PlatformPost(models.Model):
         "rejected": "red",
         "scheduled": "blue",
         "publishing": "indigo",
+        "awaiting_creator": "amber",
         "published": "green",
         "partially_published": "yellow",  # only used by Post-level aggregate
         "failed": "red",

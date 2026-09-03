@@ -118,6 +118,25 @@ FIRST_COMMENT_RETRY_BACKOFF = [120, 600, 1800]  # 2min, 10min, 30min
 FirstCommentStatus = PlatformPost.FirstCommentStatus
 
 
+def _tiktok_post_mode(workspace_id) -> str:
+    """Default TikTok delivery route for a workspace.
+
+    Only consulted when the post itself carries no ``post_mode``: a choice made
+    in the composer always wins. Resolved through the usual cascade (workspace
+    -> org -> deployment default) so a deployment that *did* pass TikTok's audit
+    can put direct posting back without touching code.
+    """
+    default = getattr(settings, "PUBLISHER_TIKTOK_POST_MODE", "INBOX")
+    try:
+        from apps.settings_manager.helpers import get_setting
+
+        value = get_setting(workspace_id, "publishing.tiktok_post_mode", default=default)
+        return str(value or default).upper()
+    except Exception:
+        logger.warning("Could not resolve tiktok_post_mode; using %s", default, exc_info=True)
+        return default
+
+
 def _first_comment_delay(workspace_id) -> int:
     """Seconds to wait after publishing before posting the first comment.
 
@@ -331,8 +350,17 @@ class PublishEngine:
                         **(platform_post.platform_extra or {}),
                         **response_extra,
                     }
-                platform_post.status = PlatformPost.Status.PUBLISHED
-                platform_post.published_at = timezone.now()
+                # A TikTok inbox upload is not a publication: the video is
+                # in the creator's TikTok drafts and only they can post it.
+                # Marking it PUBLISHED here would show a green badge for a
+                # video nobody can see. ``published_at`` stays empty until
+                # TikTok's status endpoint confirms it went out
+                # (``reconcile_awaiting_creator``).
+                if isinstance(response_extra, dict) and response_extra.get("post_mode") == "INBOX":
+                    platform_post.status = PlatformPost.Status.AWAITING_CREATOR
+                else:
+                    platform_post.status = PlatformPost.Status.PUBLISHED
+                    platform_post.published_at = timezone.now()
                 platform_post.save()
 
                 # A published post leaves the queue: drop the QueueEntry that
@@ -475,6 +503,13 @@ class PublishEngine:
             extra = {"tags": platform_post.post.tags or []}
             platform_extra = platform_post.platform_extra or {}
             extra.update(platform_extra)
+
+            # A TikTok post saved before this workspace had a route (or by
+            # any path that doesn't go through the composer) falls back to the
+            # workspace default rather than silently taking direct post, which
+            # an unaudited app cannot do.
+            if platform == "tiktok" and not extra.get("post_mode"):
+                extra["post_mode"] = _tiktok_post_mode(platform_post.post.workspace_id)
 
             # Inject page_id for Facebook from the connected account.
             if platform == "facebook" and "page_id" not in extra:
@@ -703,6 +738,70 @@ class PublishEngine:
                     "window_resets_at": resets_at,
                 },
             )
+
+    def reconcile_awaiting_creator(self):
+        """Settle PlatformPosts parked in ``awaiting_creator``.
+
+        One video per row, already uploaded to TikTok's drafts. Asks TikTok
+        what became of it and moves the row to ``published`` or ``failed``;
+        anything still in the creator's hands is left untouched. Returns how
+        many rows moved.
+
+        Deliberately never calls ``publish_post`` again: the bytes are already
+        on TikTok's side, and a second upload would both duplicate the video
+        and consume one of the five pending-upload slots TikTok allows per
+        user per day.
+        """
+        from apps.composer.models import PlatformPost
+
+        pending = (
+            PlatformPost.objects.filter(status=PlatformPost.Status.AWAITING_CREATOR)
+            .select_related("social_account", "post")
+            .order_by("updated_at")
+        )
+        moved = 0
+        for platform_post in pending:
+            account = platform_post.social_account
+            if not platform_post.platform_post_id:
+                # No publish handle to ask about — nothing this task can do.
+                continue
+            try:
+                provider, access_token = _provider_and_access_token(account)
+                reader = getattr(provider, "inbox_publish_state", None)
+                if reader is None:
+                    continue
+                state = reader(access_token, platform_post.platform_post_id)
+            except Exception:
+                logger.warning(
+                    "Could not reconcile PlatformPost %s; will retry next cycle",
+                    platform_post.id,
+                    exc_info=True,
+                )
+                continue
+
+            if state == "published":
+                platform_post.status = PlatformPost.Status.PUBLISHED
+                platform_post.published_at = timezone.now()
+                platform_post.save(update_fields=["status", "published_at", "updated_at"])
+                self._sync_parent_published_at(platform_post.post)
+                moved += 1
+                logger.info(
+                    "[PUBLISHER] Azione: bozza TikTok pubblicata dal creator, risultato: PlatformPost %s published",
+                    platform_post.id,
+                )
+            elif state == "failed":
+                platform_post.status = PlatformPost.Status.FAILED
+                platform_post.publish_error = (
+                    "TikTok discarded the draft (failed or expired). The video was "
+                    "uploaded but never published from the TikTok app."
+                )
+                platform_post.save(update_fields=["status", "publish_error", "updated_at"])
+                moved += 1
+                logger.info(
+                    "[PUBLISHER] Azione: bozza TikTok scaduta o rifiutata, risultato: PlatformPost %s failed",
+                    platform_post.id,
+                )
+        return moved
 
     def _sync_parent_published_at(self, post):
         """Reflect the latest child published_at onto the parent Post.

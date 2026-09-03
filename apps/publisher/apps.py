@@ -21,7 +21,7 @@ class PublisherConfig(AppConfig):
         try:
             from background_task.models import Task
 
-            from apps.publisher.tasks import run_publish_cycle
+            from apps.publisher.tasks import reconcile_awaiting_creator, run_publish_cycle
 
             if not Task.objects.filter(verbose_name="run_publish_cycle").exists():
                 run_publish_cycle(
@@ -29,5 +29,14 @@ class PublisherConfig(AppConfig):
                     verbose_name="run_publish_cycle",
                 )
                 logger.info("Registered recurring publish task (every 15s)")
+
+            # Ten minutes is plenty: it waits on a person opening the TikTok
+            # app, not on a machine.
+            if not Task.objects.filter(verbose_name="reconcile_awaiting_creator").exists():
+                reconcile_awaiting_creator(
+                    repeat=600,
+                    verbose_name="reconcile_awaiting_creator",
+                )
+                logger.info("Registered recurring TikTok inbox reconciliation (every 10m)")
         except Exception:
             logger.debug("Skipping publish task registration (database not ready)")
