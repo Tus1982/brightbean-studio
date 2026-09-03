@@ -348,7 +348,7 @@ class PlatformPost(models.Model):
         # TikTok inbox mode: the video is sitting in the creator's TikTok
         # drafts. The upload succeeded, but nothing is live until the creator
         # opens TikTok and publishes it, so this must never read "Published".
-        AWAITING_CREATOR = "awaiting_creator", "Awaiting creator"
+        AWAITING_CREATOR = "awaiting_creator", "In TikTok drafts"
         PUBLISHED = "published", "Published"
         FAILED = "failed", "Failed"
         ON_HOLD = "on_hold", "On Hold"

@@ -27,7 +27,7 @@ class Migration(migrations.Migration):
                     ("rejected", "Rejected"),
                     ("scheduled", "Scheduled"),
                     ("publishing", "Publishing"),
-                    ("awaiting_creator", "Awaiting creator"),
+                    ("awaiting_creator", "In TikTok drafts"),
                     ("published", "Published"),
                     ("failed", "Failed"),
                     ("on_hold", "On Hold"),
