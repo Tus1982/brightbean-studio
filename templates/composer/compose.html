@@ -885,13 +885,18 @@
                             </div>
                             <input type="hidden" :name="'tiktok_post_mode_' + accId" :value="ttPostMode">
                             <p x-show="ttPostMode === 'INBOX'" class="text-[11px] text-amber-600 mt-1.5">
-                                TikTok takes only the video this way. The caption, visibility and
-                                interaction settings are asked of you inside the TikTok app when you
-                                open the draft, so nothing typed here reaches TikTok. Up to 5 unfinished
-                                uploads per day.
+                                TikTok takes only the video this way: whoever publishes writes the
+                                caption and picks the settings inside the app. Fill them in here anyway
+                                and they are sent to them as instructions. Up to 5 unfinished uploads
+                                per day.
                             </p>
                         </div>
-                        <div x-show="ttPostMode === 'DIRECT_POST'" class="space-y-3">
+                        <div class="space-y-3">
+                            <p x-show="ttPostMode === 'INBOX'"
+                               class="text-[11px] text-amber-700 bg-amber-50 border border-amber-200 rounded-md px-2 py-1.5">
+                                TikTok non riceve queste impostazioni. Compilale lo stesso: vengono
+                                mandate a chi pubblica, come istruzioni da applicare nell'app.
+                            </p>
                         <!-- Privacy: TikTok requires an explicit choice from the creator's allowed options -->
                         <div>
                             <label class="block text-[11px] font-semibold text-stone-400 uppercase tracking-wider mb-1">

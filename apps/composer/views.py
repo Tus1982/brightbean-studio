@@ -209,17 +209,10 @@ def _sync_platform_posts(request, post, workspace, initial_status=None):
             if post_mode not in TIKTOK_POST_MODES:
                 post_mode = saved_extra.get("post_mode") or _tiktok_default_post_mode(workspace)
 
-            if post_mode == "INBOX":
-                # The inbox endpoint takes no post_info, so privacy, the
-                # interaction toggles and the disclosure flags are meaningless
-                # here — TikTok asks the creator for them inside the app.
-                # ``x-show`` only hides those inputs, it doesn't stop the
-                # browser submitting them, so they are dropped server-side
-                # instead of being stored as settings that never travel.
-                pp.platform_extra = {"post_mode": post_mode}
-                pp.save()
-                continue
-
+            # Both modes keep the same settings. In INBOX mode they never reach
+            # TikTok — the provider sends the video alone — but they are what the
+            # person who finishes the post inside the app has to apply, so they
+            # are carried to them rather than thrown away.
             privacy = request.POST.get(f"tiktok_privacy_level_{acc_id}", "").strip()
             if privacy not in TIKTOK_PRIVACY_LEVELS:
                 # An empty/invalid submit (required-validation bypassed) must
