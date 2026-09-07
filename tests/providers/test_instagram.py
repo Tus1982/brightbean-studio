@@ -987,3 +987,61 @@ def test_feed_post_still_sends_the_caption():
 
     payload = provider._create_container.call_args.args[2]
     assert payload["caption"] == "questa invece si"
+
+
+from providers.meta_insights import fetch_insights_safe as fetch_insights_safe_originale  # noqa: E402
+
+
+def test_a_story_is_measured_with_the_story_metrics():
+    """[07/09/2026] Asking a story for the feed metrics gets nothing back: likes,
+    saved and shares are not supported there. A story has reach, views, replies and
+    navigation — and those numbers die with it, 24 hours later."""
+    from unittest.mock import MagicMock
+
+    from providers import instagram as ig
+
+    provider = ig.InstagramProvider({"client_id": "id", "client_secret": "secret"})
+    provider._get_media_fields = MagicMock(return_value={"media_product_type": "STORY"})
+    visti = {}
+
+    def _finto(_req, *, platform, endpoint, access_token, metrics, endpoint_type):
+        visti["metriche"] = list(metrics)
+        return {"reach": 120, "views": 140, "replies": 3, "navigation": 90}, []
+
+    ig.fetch_insights_safe = _finto
+    try:
+        m = provider.get_post_metrics("token", "media-1")
+    finally:
+        ig.fetch_insights_safe = fetch_insights_safe_originale
+
+    assert visti["metriche"] == ["reach", "views", "replies", "navigation"]
+    assert m.reach == 120 and m.video_views == 140
+    # niente cuori e niente salvataggi su una Storia: zero qui vuol dire «non esiste»,
+    # e infatti i suoi numeri veri viaggiano accanto, col nome che gli da' Meta
+    assert m.likes == 0 and m.saves == 0
+    assert m.extra["replies"] == 3 and m.extra["navigation"] == 90
+    assert m.extra["surface"] == "story"
+
+
+def test_a_feed_post_keeps_the_feed_metrics():
+    from unittest.mock import MagicMock
+
+    from providers import instagram as ig
+
+    provider = ig.InstagramProvider({"client_id": "id", "client_secret": "secret"})
+    provider._get_media_fields = MagicMock(return_value={"media_product_type": "FEED",
+                                                         "like_count": 9})
+    visti = {}
+
+    def _finto(_req, *, platform, endpoint, access_token, metrics, endpoint_type):
+        visti["metriche"] = list(metrics)
+        return {"reach": 50, "likes": 9, "saved": 2}, []
+
+    ig.fetch_insights_safe = _finto
+    try:
+        m = provider.get_post_metrics("token", "media-2")
+    finally:
+        ig.fetch_insights_safe = fetch_insights_safe_originale
+
+    assert "saved" in visti["metriche"] and "navigation" not in visti["metriche"]
+    assert m.likes == 9 and m.saves == 2
