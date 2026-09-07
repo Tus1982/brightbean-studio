@@ -187,6 +187,18 @@ class CreatePostRequest(Schema):
         default_factory=list,
         description="MediaAsset IDs already uploaded to the workspace's media library. Position-ordered.",
     )
+    post_type: str | None = Field(
+        None,
+        description=(
+            "Which surface to publish on: ``story`` or ``reel``. Omit for a normal "
+            "feed post — the engine then reads the media (image / video / carousel) "
+            "as it always has. Stored as the ``post_type`` hint in the platform "
+            "post's ``platform_extra`` and honoured by the publisher; a platform "
+            "that does not support the surface is rejected here, not at publish "
+            "time. Both surfaces require at least one media asset; a reel requires "
+            "a video."
+        ),
+    )
     platform_overrides: list[PlatformOverride] = Field(
         default_factory=list,
         description=(

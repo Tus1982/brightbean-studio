@@ -933,3 +933,57 @@ def test_comment_poll_keeps_the_author_when_only_replies_are_rejected(make_provi
     sent = provider._request.call_args_list[1].kwargs["params"]["fields"]
     assert "from{" in sent
     assert "replies" not in sent
+
+
+def test_story_does_not_send_a_caption():
+    """Il contenitore Storia di Instagram non ha un campo testo: la didascalia si
+    lascia fuori (e si dichiara), invece di mandarla e farsela rifiutare. [07/09/2026]"""
+    from unittest.mock import MagicMock
+
+    from providers.instagram import InstagramProvider
+    from providers.types import PostType, PublishContent
+
+    provider = InstagramProvider({"client_id": "id", "client_secret": "secret"})
+    provider._create_container = MagicMock(return_value="container-1")
+    provider._wait_for_container = MagicMock(return_value=None)
+    provider._publish_container = MagicMock(return_value="pubblicato")
+
+    provider.publish_post(
+        "token",
+        PublishContent(
+            text="questa non deve viaggiare",
+            media_urls=["https://cdn.example.com/story.png"],
+            post_type=PostType.STORY,
+            extra={"ig_user_id": "ig-1"},
+        ),
+    )
+
+    payload = provider._create_container.call_args.args[2]
+    assert payload["media_type"] == "STORIES"
+    assert payload["image_url"] == "https://cdn.example.com/story.png"
+    assert "caption" not in payload
+
+
+def test_feed_post_still_sends_the_caption():
+    from unittest.mock import MagicMock
+
+    from providers.instagram import InstagramProvider
+    from providers.types import PostType, PublishContent
+
+    provider = InstagramProvider({"client_id": "id", "client_secret": "secret"})
+    provider._create_container = MagicMock(return_value="container-1")
+    provider._wait_for_container = MagicMock(return_value=None)
+    provider._publish_container = MagicMock(return_value="pubblicato")
+
+    provider.publish_post(
+        "token",
+        PublishContent(
+            text="questa invece si",
+            media_urls=["https://cdn.example.com/post.png"],
+            post_type=PostType.IMAGE,
+            extra={"ig_user_id": "ig-1"},
+        ),
+    )
+
+    payload = provider._create_container.call_args.args[2]
+    assert payload["caption"] == "questa invece si"

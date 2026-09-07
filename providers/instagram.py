@@ -307,7 +307,14 @@ class InstagramProvider(SocialProvider):
         """Publish a single image, reel, or story."""
         payload: dict = {}
 
-        if content.text:
+        # A Story has no text field: Instagram's story container rejects
+        # ``caption``. The words are already burnt into the 1080x1920 image, so
+        # the caption is dropped here rather than sent and refused — but it is
+        # said out loud, because a silently dropped caption looks like a bug to
+        # whoever wrote it. [2026-09-07]
+        if content.text and content.post_type == PostType.STORY:
+            logger.info("Instagram story: caption dropped, stories carry no text field")
+        elif content.text:
             payload["caption"] = content.text
 
         if content.post_type in (PostType.REEL, PostType.VIDEO):

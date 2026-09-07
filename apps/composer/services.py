@@ -85,6 +85,7 @@ def create_post(
     author=None,
     status: str = "draft",
     platform_overrides: dict[Any, dict[str, str | None]] | None = None,
+    post_type: str | None = None,
 ):
     """Create a ``Post`` + one ``PlatformPost`` for ``social_account``.
 
@@ -200,6 +201,11 @@ def create_post(
             platform_specific_title=override.get("title"),
             platform_specific_caption=override.get("caption"),
             platform_specific_first_comment=override.get("first_comment"),
+            # ``post_type`` is the surface (story / reel). It lives in
+            # ``platform_extra`` because that is the channel the publish engine
+            # already reads its hint from — a second column would be a second
+            # truth, and the engine would have to be taught which one wins.
+            platform_extra={"post_type": post_type} if post_type else {},
         )
         for position, (_mid, u) in enumerate(resolved):
             # ``u`` is validated non-None and present in ``asset_map`` above

@@ -1215,3 +1215,133 @@ def test_find_own_comment_falls_back_to_the_raw_id_like_publish_does():
 
     assert provider.find_own_comment("page-token", "video-1", "More detail") == "c-ours"
     assert provider._request.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Stories and Reels [2026-09-07]
+#
+# Neither goes through /feed. They are asked for explicitly through the
+# ``post_type`` hint: the same 1080x1920 image is a perfectly good feed post,
+# so guessing from the media would silently move somebody's post onto a
+# surface that disappears in 24 hours.
+# ---------------------------------------------------------------------------
+
+
+def test_photo_story_stages_the_photo_unpublished_then_posts_it_as_a_story():
+    provider = FacebookProvider({"client_id": "id", "client_secret": "secret"})
+    provider._request = MagicMock(
+        side_effect=[
+            _resp({"id": "photo-1"}),
+            _resp({"success": True, "post_id": "story-1"}),
+        ]
+    )
+
+    result = provider.publish_post(
+        "page-token",
+        PublishContent(
+            text="questa non viaggia",
+            media_urls=["https://cdn.example.com/story.png"],
+            post_type=PostType.STORY,
+            extra={"page_id": "page-1"},
+        ),
+    )
+
+    staged, published = provider._request.call_args_list
+    assert staged.args[1].endswith("/page-1/photos")
+    # unpublished, or the photo lands in the feed as well as the story
+    assert staged.kwargs["json"] == {"url": "https://cdn.example.com/story.png", "published": False}
+    assert published.args[1].endswith("/page-1/photo_stories")
+    assert published.kwargs["json"] == {"photo_id": "photo-1"}
+    assert result.platform_post_id == "story-1"
+
+
+def test_video_story_uploads_by_url_then_finishes():
+    provider = FacebookProvider({"client_id": "id", "client_secret": "secret"})
+    provider._request = MagicMock(
+        side_effect=[
+            _resp({"video_id": "vid-1", "upload_url": "https://rupload.facebook.com/video-upload/v25.0/vid-1"}),
+            _resp({}),
+            _resp({"success": True, "post_id": "story-9"}),
+        ]
+    )
+
+    result = provider.publish_post(
+        "page-token",
+        PublishContent(
+            text="",
+            media_urls=["https://cdn.example.com/clip.mp4"],
+            post_type=PostType.STORY,
+            extra={"page_id": "page-1"},
+        ),
+    )
+
+    start, upload, finish = provider._request.call_args_list
+    assert start.kwargs["params"] == {"upload_phase": "start"}
+    assert start.args[1].endswith("/page-1/video_stories")
+    # il file non passa da noi: lo va a prendere Meta dall'URL
+    assert upload.kwargs["headers"]["file_url"] == "https://cdn.example.com/clip.mp4"
+    assert upload.kwargs["headers"]["Authorization"] == "OAuth page-token"
+    assert finish.kwargs["params"] == {"upload_phase": "finish", "video_id": "vid-1"}
+    assert result.platform_post_id == "story-9"
+
+
+def test_a_story_without_media_is_refused_before_any_call():
+    provider = FacebookProvider({"client_id": "id", "client_secret": "secret"})
+    provider._request = MagicMock()
+
+    with pytest.raises(PublishError):
+        provider.publish_post(
+            "page-token",
+            PublishContent(text="solo testo", media_urls=[], post_type=PostType.STORY, extra={"page_id": "page-1"}),
+        )
+    provider._request.assert_not_called()
+
+
+def test_reel_publishes_with_the_caption_as_description():
+    provider = FacebookProvider({"client_id": "id", "client_secret": "secret"})
+    provider._request = MagicMock(
+        side_effect=[
+            _resp({"video_id": "vid-2", "upload_url": "https://rupload.facebook.com/video-upload/v25.0/vid-2"}),
+            _resp({}),
+            _resp({"success": True, "post_id": "reel-1"}),
+        ]
+    )
+
+    result = provider.publish_post(
+        "page-token",
+        PublishContent(
+            text="Didascalia del reel",
+            media_urls=["https://cdn.example.com/reel.mp4"],
+            post_type=PostType.REEL,
+            extra={"page_id": "page-1"},
+        ),
+    )
+
+    _start, _upload, finish = provider._request.call_args_list
+    assert finish.args[1].endswith("/page-1/video_reels")
+    assert finish.kwargs["params"]["video_state"] == "PUBLISHED"
+    assert finish.kwargs["params"]["description"] == "Didascalia del reel"
+    assert result.platform_post_id == "reel-1"
+
+
+def test_a_reel_made_of_an_image_is_refused():
+    provider = FacebookProvider({"client_id": "id", "client_secret": "secret"})
+    provider._request = MagicMock()
+
+    with pytest.raises(PublishError):
+        provider.publish_post(
+            "page-token",
+            PublishContent(
+                text="",
+                media_urls=["https://cdn.example.com/story.png"],
+                post_type=PostType.REEL,
+                extra={"page_id": "page-1"},
+            ),
+        )
+    provider._request.assert_not_called()
+
+
+def test_stories_and_reels_are_declared_supported():
+    provider = FacebookProvider({"client_id": "id", "client_secret": "secret"})
+    assert PostType.STORY in provider.supported_post_types
+    assert PostType.REEL in provider.supported_post_types

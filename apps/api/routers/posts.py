@@ -55,6 +55,42 @@ router = Router(tags=["posts"])
 # ---------------------------------------------------------------------------
 
 
+#: Surfaces a caller may ask for explicitly. Deliberately NOT the whole
+#: ``PostType`` enum: ``image``/``video``/``carousel``/``text`` are what the
+#: engine already works out from the media, and letting a caller override those
+#: only creates ways to contradict the attachments. ``story`` and ``reel`` are
+#: different — no attachment can tell you the author wanted a surface that
+#: disappears in 24 hours, or a reel instead of a feed video.
+API_POST_TYPES = ("story", "reel")
+
+
+def _validate_post_type(post_type: str | None, social_account) -> str | None:
+    """Normalise and check the requested surface against the target platform.
+
+    Refused HERE and not at publish time on purpose: a post rejected by the
+    platform three hours later is a post nobody sees and nobody is told about.
+    """
+    if post_type is None or str(post_type).strip() == "":
+        return None
+    value = str(post_type).strip().lower()
+    if value not in API_POST_TYPES:
+        raise HttpError(422, f"post_type must be one of {list(API_POST_TYPES)}; got {post_type!r}.")
+    from providers import get_provider  # local: keeps the router import-light
+    from providers.types import PostType
+
+    try:
+        provider = get_provider(social_account.platform)
+        supported = {pt.value for pt in provider.supported_post_types}
+    except Exception:  # pragma: no cover — an unknown platform is the registry's problem
+        supported = {pt.value for pt in PostType}
+    if value not in supported:
+        raise HttpError(
+            422,
+            f"{social_account.platform} does not publish {value!r}: it supports {sorted(supported)}.",
+        )
+    return value
+
+
 def _require_perm(request: HttpRequest, key: str) -> None:
     """Re-check a workspace permission inside a Ninja route body.
 
@@ -162,6 +198,12 @@ def create(request, payload: CreatePostRequest):
     if payload.action == "schedule" and payload.scheduled_at is None:
         raise HttpError(422, "scheduled_at is required when action='schedule'.")
 
+    # A surface, when one is asked for. Checked before the idempotency claim
+    # like every other "can this possibly succeed?" test above it.
+    post_type = _validate_post_type(payload.post_type, social_account)
+    if post_type and not payload.media_asset_ids:
+        raise HttpError(422, f"A {post_type} needs at least one media asset.")
+
     # Build the platform_overrides dict and validate that each override's
     # social_account_id matches one of the post's target accounts. In the
     # current single-account API that's only ``payload.social_account_id``;
@@ -254,6 +296,7 @@ def create(request, payload: CreatePostRequest):
             author=request.user if not request.user.is_anonymous else None,
             status="scheduled" if payload.action == "schedule" else "draft",
             platform_overrides=platform_overrides,
+            post_type=post_type,
         )
         body = _post_to_response(request, post)
         status_code = 201
