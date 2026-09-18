@@ -964,6 +964,66 @@ def test_story_does_not_send_a_caption():
     assert "caption" not in payload
 
 
+PRESIGNED_MP4 = "https://r2.example.com/media/reel.mp4?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=abc"
+
+
+def test_a_story_from_a_presigned_video_is_sent_as_a_video():
+    """Un Reel ripubblicato come Storia usciva come foto della copertina: l'URL firmato di R2
+    finisce con la firma, non con .mp4, e il video partiva come image_url. [18/09/2026]"""
+    from unittest.mock import MagicMock
+
+    from providers.instagram import InstagramProvider
+    from providers.types import PostType, PublishContent
+
+    provider = InstagramProvider({"client_id": "id", "client_secret": "secret"})
+    provider._create_container = MagicMock(return_value="container-1")
+    provider._wait_for_container = MagicMock(return_value=None)
+    provider._publish_container = MagicMock(return_value="pubblicato")
+
+    provider.publish_post(
+        "token",
+        PublishContent(media_urls=[PRESIGNED_MP4], post_type=PostType.STORY, extra={"ig_user_id": "ig-1"}),
+    )
+
+    payload = provider._create_container.call_args.args[2]
+    assert payload["media_type"] == "STORIES"
+    assert payload["video_url"] == PRESIGNED_MP4
+    assert "image_url" not in payload
+
+
+def test_a_carousel_video_behind_a_presigned_url_is_a_video():
+    from unittest.mock import MagicMock
+
+    from providers.instagram import InstagramProvider
+    from providers.types import PostType, PublishContent
+
+    provider = InstagramProvider({"client_id": "id", "client_secret": "secret"})
+    provider._create_container = MagicMock(side_effect=["c1", "c2", "album"])
+    provider._wait_for_container = MagicMock(return_value=None)
+    provider._publish_container = MagicMock(return_value="pubblicato")
+
+    provider.publish_post(
+        "token",
+        PublishContent(
+            media_urls=["https://r2.example.com/a.png?X-Amz-Signature=x", PRESIGNED_MP4],
+            post_type=PostType.CAROUSEL,
+            extra={"ig_user_id": "ig-1"},
+        ),
+    )
+
+    primo = provider._create_container.call_args_list[0].args[2]
+    secondo = provider._create_container.call_args_list[1].args[2]
+    assert "image_url" in primo and "video_url" not in primo
+    assert secondo["media_type"] == "VIDEO" and secondo["video_url"] == PRESIGNED_MP4
+
+
+def test_instagram_login_story_from_a_presigned_video_is_a_video():
+    from providers.instagram_login import _is_video_url
+
+    assert _is_video_url(PRESIGNED_MP4)
+    assert not _is_video_url("https://r2.example.com/story.png?X-Amz-Signature=x")
+
+
 def test_feed_post_still_sends_the_caption():
     from unittest.mock import MagicMock
 
