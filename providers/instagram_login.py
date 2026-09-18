@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 import time
 from datetime import datetime
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 from .base import SocialProvider
 from .exceptions import APIError, OAuthError, PublishError
@@ -82,6 +82,18 @@ INSTAGRAM_MEDIA_FIELDS = [
 # Container polling
 CONTAINER_POLL_INTERVAL = 2  # seconds
 CONTAINER_POLL_MAX_ATTEMPTS = 60  # ~2 minutes max
+
+
+
+# A presigned R2/S3 URL ends in ``?X-Amz-...``, not in ``.mp4``: checking the whole
+# string sent every stored video to Instagram as ``image_url``, and Instagram then
+# published the first frame as a still (a Reel reposted as a Story showed only its
+# cover). Only the path says what the file is. [2026-09-18]
+VIDEO_URL_SUFFIXES = (".mp4", ".mov")
+
+
+def _is_video_url(url: str) -> bool:
+    return urlparse(url or "").path.lower().endswith(VIDEO_URL_SUFFIXES)
 
 
 class InstagramLoginProvider(SocialProvider):
@@ -315,7 +327,7 @@ class InstagramLoginProvider(SocialProvider):
         elif content.post_type == PostType.STORY:
             url = content.media_urls[0]
             payload["media_type"] = "STORIES"
-            if url.lower().endswith((".mp4", ".mov")):
+            if _is_video_url(url):
                 payload["video_url"] = url
             else:
                 payload["image_url"] = url
@@ -331,7 +343,7 @@ class InstagramLoginProvider(SocialProvider):
         child_ids: list[str] = []
 
         for url in content.media_urls:
-            is_video = url.lower().endswith((".mp4", ".mov"))
+            is_video = _is_video_url(url)
             child_payload: dict = {"is_carousel_item": True}
             if is_video:
                 child_payload["media_type"] = "VIDEO"
