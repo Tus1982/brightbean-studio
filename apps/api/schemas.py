@@ -199,6 +199,23 @@ class CreatePostRequest(Schema):
             "a video."
         ),
     )
+    board_id: str | None = Field(
+        None,
+        max_length=64,
+        description=(
+            "Pinterest only: the board the Pin goes to (an id from the account's "
+            "boards). Required for Pinterest — the publisher cannot pin without it — "
+            "and rejected on every other platform. Stored in ``platform_extra``."
+        ),
+    )
+    link_url: str | None = Field(
+        None,
+        max_length=2048,
+        description=(
+            "Pinterest only: the destination link of the Pin (e.g. the product page). "
+            "Stored in ``platform_extra``; the publisher hands it to the provider."
+        ),
+    )
     platform_overrides: list[PlatformOverride] = Field(
         default_factory=list,
         description=(

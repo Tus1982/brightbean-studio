@@ -204,6 +204,23 @@ def create(request, payload: CreatePostRequest):
     if post_type and not payload.media_asset_ids:
         raise HttpError(422, f"A {post_type} needs at least one media asset.")
 
+    # Pinterest needs a board to pin into, and takes a destination link. Both ride in
+    # ``platform_extra`` (the channel the publisher already reads) and are refused on
+    # other platforms instead of being silently ignored at publish time.
+    pin_extra: dict = {}
+    board_id = (payload.board_id or "").strip()
+    link_url = (payload.link_url or "").strip()
+    if social_account.platform == "pinterest":
+        if not board_id:
+            raise HttpError(422, "board_id is required for Pinterest.")
+        if not payload.media_asset_ids:
+            raise HttpError(422, "A Pin needs at least one media asset.")
+        pin_extra["board_id"] = board_id
+        if link_url:
+            pin_extra["link_url"] = link_url
+    elif board_id or link_url:
+        raise HttpError(422, "board_id and link_url are only accepted for Pinterest.")
+
     # Build the platform_overrides dict and validate that each override's
     # social_account_id matches one of the post's target accounts. In the
     # current single-account API that's only ``payload.social_account_id``;
@@ -297,6 +314,7 @@ def create(request, payload: CreatePostRequest):
             status="scheduled" if payload.action == "schedule" else "draft",
             platform_overrides=platform_overrides,
             post_type=post_type,
+            platform_extra=pin_extra or None,
         )
         body = _post_to_response(request, post)
         status_code = 201

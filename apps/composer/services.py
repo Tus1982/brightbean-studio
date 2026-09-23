@@ -86,6 +86,7 @@ def create_post(
     status: str = "draft",
     platform_overrides: dict[Any, dict[str, str | None]] | None = None,
     post_type: str | None = None,
+    platform_extra: dict | None = None,
 ):
     """Create a ``Post`` + one ``PlatformPost`` for ``social_account``.
 
@@ -205,7 +206,8 @@ def create_post(
             # ``platform_extra`` because that is the channel the publish engine
             # already reads its hint from — a second column would be a second
             # truth, and the engine would have to be taught which one wins.
-            platform_extra={"post_type": post_type} if post_type else {},
+            # Extra per-platform keys (Pinterest ``board_id`` / ``link_url``) join it here.
+            platform_extra={**({"post_type": post_type} if post_type else {}), **(platform_extra or {})},
         )
         for position, (_mid, u) in enumerate(resolved):
             # ``u`` is validated non-None and present in ``asset_map`` above
