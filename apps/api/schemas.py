@@ -327,6 +327,13 @@ class PostResponse(Schema):
     proposed_publish_at: dt.datetime | None
     status: str  # derived aggregate
     platform_posts: list[PlatformPostSummary]
+    media: list[dict] = Field(
+        default_factory=list,
+        description=(
+            "The post's attached media in position order: ``{id, media_type}``. The ids "
+            "are MediaAsset ids of this workspace, reusable in ``media_asset_ids``."
+        ),
+    )
     created_at: dt.datetime
     updated_at: dt.datetime
 
@@ -371,6 +378,10 @@ class PostResponse(Schema):
             proposed_publish_at=post.proposed_publish_at,
             status=post.status,
             platform_posts=platform_posts,
+            media=[
+                {"id": str(pm.media_asset_id), "media_type": pm.media_asset.media_type}
+                for pm in post.media_attachments.select_related("media_asset").order_by("position")
+            ],
             created_at=post.created_at,
             updated_at=post.updated_at,
         )
