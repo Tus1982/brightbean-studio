@@ -6,7 +6,7 @@ import logging
 from urllib.parse import urlencode
 
 from .base import SocialProvider
-from .exceptions import OAuthError, PublishError
+from .exceptions import APIError, OAuthError, PublishError
 from .types import (
     AccountProfile,
     AuthType,
@@ -25,6 +25,8 @@ TOKEN_URL = "https://oauth2.googleapis.com/token"
 REVOKE_URL = "https://oauth2.googleapis.com/revoke"
 ACCOUNTS_API = "https://mybusinessaccountmanagement.googleapis.com/v1"
 BUSINESS_INFO_API = "https://mybusinessbusinessinformation.googleapis.com/v1"
+# Business Information API v1 rejects locations.list without a readMask (400 "read_mask: Field is required").
+LOCATION_READ_MASK = "name,title,storefrontAddress,phoneNumbers"
 POSTS_API = "https://mybusiness.googleapis.com/v4"
 
 
@@ -189,6 +191,7 @@ class GoogleBusinessProvider(SocialProvider):
             "GET",
             f"{BUSINESS_INFO_API}/{account_id}/locations",
             access_token=access_token,
+            params={"readMask": LOCATION_READ_MASK, "pageSize": 100},
         )
         data = resp.json()
         locations = data.get("locations", [])
@@ -197,7 +200,77 @@ class GoogleBusinessProvider(SocialProvider):
                 "No locations found for Google Business account",
                 platform=self.platform_name,
             )
-        return locations[0]["name"]
+        # The v4 localPosts endpoint wants the full "accounts/X/locations/Y" path.
+        return f"{account_id}/{locations[0]['name']}"
+
+    def _list_accounts(self, access_token: str) -> list[dict]:
+        accounts: list[dict] = []
+        page_token = None
+        while True:
+            params = {"pageSize": 20}
+            if page_token:
+                params["pageToken"] = page_token
+            data = self._request("GET", f"{ACCOUNTS_API}/accounts", access_token=access_token, params=params).json()
+            accounts.extend(data.get("accounts", []))
+            page_token = data.get("nextPageToken")
+            if not page_token:
+                return accounts
+
+    def _list_locations(self, access_token: str, account_id: str) -> list[dict]:
+        locations: list[dict] = []
+        page_token = None
+        while True:
+            params = {"readMask": LOCATION_READ_MASK, "pageSize": 100}
+            if page_token:
+                params["pageToken"] = page_token
+            data = self._request(
+                "GET", f"{BUSINESS_INFO_API}/{account_id}/locations", access_token=access_token, params=params
+            ).json()
+            locations.extend(data.get("locations", []))
+            page_token = data.get("nextPageToken")
+            if not page_token:
+                return locations
+
+    def get_user_pages(self, access_token: str) -> list[dict]:
+        """Every location (store) the user manages, across all accounts, for the account-selection step.
+
+        One SocialAccount per location: id is the full "accounts/X/locations/Y" path the v4 posts API needs.
+        Google has no per-location token, so access_token is left empty (the user token is used).
+        """
+        pages: list[dict] = []
+        seen: set[str] = set()
+        for account in self._list_accounts(access_token):
+            account_id = account.get("name", "")
+            if not account_id:
+                continue
+            try:
+                locations = self._list_locations(access_token, account_id)
+            except APIError:
+                logger.warning("Google Business: cannot list locations of %s", account_id, exc_info=True)
+                continue
+            for loc in locations:
+                loc_name = loc.get("name", "")
+                if not loc_name:
+                    continue
+                full_id = f"{account_id}/{loc_name}"
+                if full_id in seen:
+                    continue
+                seen.add(full_id)
+                address = loc.get("storefrontAddress", {})
+                parts = [*address.get("addressLines", []), address.get("locality", "")]
+                where = ", ".join(p for p in parts if p)
+                title = loc.get("title", loc_name)
+                pages.append(
+                    {
+                        "id": full_id,
+                        "name": f"{title} - {where}" if where else title,
+                        "access_token": "",
+                        "category": "Google Business Profile",
+                        "picture": None,
+                        "followers_count": 0,
+                    }
+                )
+        return pages
 
     # ------------------------------------------------------------------
     # Profile
@@ -211,6 +284,7 @@ class GoogleBusinessProvider(SocialProvider):
             "GET",
             f"{BUSINESS_INFO_API}/{account_id}/locations",
             access_token=access_token,
+            params={"readMask": LOCATION_READ_MASK, "pageSize": 100},
         )
         data = resp.json()
         locations = data.get("locations", [])
@@ -223,7 +297,7 @@ class GoogleBusinessProvider(SocialProvider):
             address = ", ".join(address_lines) if address_lines else ""
             phone = loc.get("phoneNumbers", {}).get("primaryPhone", "")
             return AccountProfile(
-                platform_id=loc.get("name", account_id),
+                platform_id=f"{account_id}/{loc['name']}" if loc.get("name") else account_id,
                 name=name,
                 handle=None,
                 extra={"address": address, "phone": phone},
