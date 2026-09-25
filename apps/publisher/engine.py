@@ -94,6 +94,10 @@ def _resolve_publish_credentials(account):
             )
     elif platform == "facebook":
         credentials["page_id"] = account.account_platform_id
+    elif platform == "google_business" and "/locations/" in (account.account_platform_id or ""):
+        # One account per store: "accounts/X/locations/Y"
+        credentials["account_id"] = account.account_platform_id.split("/locations/")[0]
+        credentials["location_id"] = account.account_platform_id
     elif platform in ("instagram", "instagram_login"):
         credentials["ig_user_id"] = account.account_platform_id
         # The comment poll and the first-comment reconciliation both match our

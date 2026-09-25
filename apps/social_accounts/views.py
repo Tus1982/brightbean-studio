@@ -363,6 +363,7 @@ def oauth_callback(request, platform):
             PlatformCredential.Platform.FACEBOOK,
             PlatformCredential.Platform.INSTAGRAM,
             PlatformCredential.Platform.LINKEDIN_COMPANY,
+            PlatformCredential.Platform.GOOGLE_BUSINESS,
         ) and hasattr(provider, "get_user_pages"):
             pages = provider.get_user_pages(tokens.access_token)
             if pages:
@@ -373,12 +374,20 @@ def oauth_callback(request, platform):
                     "user_tokens": {
                         "access_token": tokens.access_token,
                         "refresh_token": tokens.refresh_token,
+                        # Google Business: one user token shared by every location; it expires in an hour and
+                        # must be refreshed, so its expiry is stored on each account.
+                        "expires_in": tokens.expires_in,
                     },
                     "pages": pages,
                 }
                 return redirect("social_accounts:select_account")
             else:
-                if platform == PlatformCredential.Platform.LINKEDIN_COMPANY:
+                if platform == PlatformCredential.Platform.GOOGLE_BUSINESS:
+                    warning = (
+                        "No Google Business Profile locations were found for this Google account. "
+                        "Sign in with the account that manages the store listings, then reconnect."
+                    )
+                elif platform == PlatformCredential.Platform.LINKEDIN_COMPANY:
                     warning = (
                         "No LinkedIn Company Pages were found for your account. "
                         "Only Company Pages you administer can be connected — "
@@ -481,7 +490,7 @@ def select_account(request):
     for page in page_data["pages"]:
         if page["id"] in selected_ids:
             access_token = page.get("access_token")
-            if not access_token and platform == "instagram":
+            if not access_token and platform in ("instagram", "google_business"):
                 access_token = user_tokens["access_token"]
             if not access_token:
                 messages.error(
@@ -503,7 +512,7 @@ def select_account(request):
                 profile=profile,
                 access_token=access_token,
                 refresh_token=user_tokens.get("refresh_token"),
-                expires_in=None,
+                expires_in=user_tokens.get("expires_in") if platform == "google_business" else None,
                 # Instagram-via-Facebook receives its webhooks through the
                 # linked Page, so remember which Page to subscribe.
                 webhook_target_id=page.get("page_id", ""),
