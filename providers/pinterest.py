@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import logging
 import os
+import time
 from urllib.parse import urlencode
 
 from .base import SocialProvider
@@ -24,6 +25,7 @@ from .types import (
 logger = logging.getLogger(__name__)
 
 AUTH_URL = "https://www.pinterest.com/oauth/"
+VIDEO_EXTS = (".mp4", ".mov", ".m4v", ".webm")
 API_BASE = os.environ.get("PINTEREST_API_BASE", "https://api.pinterest.com/v5")
 TOKEN_URL = f"{API_BASE}/oauth/token"
 
@@ -201,7 +203,10 @@ class PinterestProvider(SocialProvider):
             payload["alt_text"] = alt_text[:500]
 
         # Determine media source
-        is_video = content.extra.get("is_video", False)
+        # [26/09/2026] Nobody sets ``is_video`` for Pinterest (the engine resolves every
+        # Pinterest post to PIN), so a video attachment is recognised by its file.
+        first = (content.media_files[:1] or content.media_urls[:1] or [""])[0].lower().split("?")[0]
+        is_video = content.extra.get("is_video", False) or first.endswith(VIDEO_EXTS)
 
         if is_video:
             return self._publish_video_pin(access_token, content, payload)
@@ -244,44 +249,56 @@ class PinterestProvider(SocialProvider):
         content: PublishContent,
         payload: dict,
     ) -> PublishResult:
-        """Upload a video pin via the media endpoint."""
-        # Step 1: Register media upload
-        media_resp = self._request(
-            "POST",
-            f"{API_BASE}/media",
-            access_token=access_token,
-            json={"media_type": "video"},
-        )
-        media_body = media_resp.json()
+        """Video Pin, the three steps Pinterest v5 requires.
+
+        [26/09/2026 Willy] The old version PUT the bytes to ``upload_url`` and created the Pin
+        straight away: Pinterest wants a multipart POST carrying ``upload_parameters``, then the
+        media must reach ``succeeded`` before a Pin can reference it, and a video Pin needs a
+        cover (here a key frame).
+        """
+        if not content.media_files:
+            raise PublishError("No video file for Pinterest video pin", platform=self.platform_name)
+
+        # Step 1: register the upload
+        media_body = self._request(
+            "POST", f"{API_BASE}/media", access_token=access_token, json={"media_type": "video"}
+        ).json()
         media_id = media_body.get("media_id", "")
         upload_url = media_body.get("upload_url")
+        if not media_id or not upload_url:
+            raise PublishError(f"Pinterest media register failed: {media_body}", platform=self.platform_name)
 
-        if upload_url and content.media_files:
-            # Step 2: Upload video binary
-            video_path = content.media_files[0]
-            with open(video_path, "rb") as f:
-                video_data = f.read()
+        # Step 2: multipart POST to the signed bucket, parameters first, file last
+        with open(content.media_files[0], "rb") as f:
+            video_data = f.read()
+        self._request(
+            "POST",
+            upload_url,
+            data=dict(media_body.get("upload_parameters") or {}),
+            files={"file": ("video.mp4", video_data, "video/mp4")},
+            timeout=300.0,
+        )
 
-            self._request(
-                "PUT",
-                upload_url,
-                headers={"Content-Type": "video/mp4"},
-                data=video_data,
-                timeout=120.0,
+        # Step 3: wait for Pinterest to process it
+        status = ""
+        for _ in range(60):
+            status = (
+                self._request("GET", f"{API_BASE}/media/{media_id}", access_token=access_token)
+                .json()
+                .get("status", "")
             )
+            if status in ("succeeded", "failed"):
+                break
+            time.sleep(5)
+        if status != "succeeded":
+            raise PublishError(f"Pinterest video processing: {status or 'timeout'}", platform=self.platform_name)
 
-        # Step 3: Create pin referencing media_id
         payload["media_source"] = {
             "source_type": "video_id",
             "media_id": media_id,
+            "cover_image_key_frame_time": 1,
         }
-        resp = self._request(
-            "POST",
-            f"{API_BASE}/pins",
-            access_token=access_token,
-            json=payload,
-        )
-        body = resp.json()
+        body = self._request("POST", f"{API_BASE}/pins", access_token=access_token, json=payload).json()
         pin_id = body.get("id", "")
         return PublishResult(
             platform_post_id=pin_id,
