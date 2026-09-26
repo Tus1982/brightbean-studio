@@ -218,8 +218,13 @@ def create(request, payload: CreatePostRequest):
         pin_extra["board_id"] = board_id
         if link_url:
             pin_extra["link_url"] = link_url
+    elif social_account.platform == "google_business" and not board_id:
+        # [Willy 26/09/2026] Google Business: the link becomes the post's button
+        # (callToAction), the way a store points Maps visitors to the product page.
+        if link_url:
+            pin_extra["link_url"] = link_url
     elif board_id or link_url:
-        raise HttpError(422, "board_id and link_url are only accepted for Pinterest.")
+        raise HttpError(422, "board_id is only accepted for Pinterest, link_url for Pinterest and Google Business.")
 
     # Build the platform_overrides dict and validate that each override's
     # social_account_id matches one of the post's target accounts. In the

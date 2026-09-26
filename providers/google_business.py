@@ -327,10 +327,17 @@ class GoogleBusinessProvider(SocialProvider):
         topic_type = content.extra.get("topic_type", "STANDARD")
 
         body: dict = {
-            "languageCode": content.extra.get("language_code", "en"),
+            "languageCode": content.extra.get("language_code", "it"),
             "summary": content.text or "",
             "topicType": topic_type,
         }
+
+        # [Willy 26/09/2026] The destination link is the post's button on Maps / Search.
+        if content.link_url:
+            body["callToAction"] = {
+                "actionType": content.extra.get("cta_type", "LEARN_MORE"),
+                "url": content.link_url,
+            }
 
         # Attach media
         if content.media_urls:

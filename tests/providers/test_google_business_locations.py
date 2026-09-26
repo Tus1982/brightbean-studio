@@ -58,3 +58,29 @@ def test_get_location_id_uses_the_connected_store():
     p.credentials = {"account_id": "accounts/1", "location_id": "accounts/1/locations/11"}
     assert p._get_location_id("tok", p._get_account_id("tok")) == "accounts/1/locations/11"
     assert calls == []
+
+
+def test_link_diventa_bottone_e_post_in_italiano():
+    """[Willy 26/09/2026] link_url -> callToAction LEARN_MORE; lingua di default italiano."""
+    from unittest.mock import MagicMock, patch
+
+    from providers.google_business import GoogleBusinessProvider
+    from providers.types import PostType, PublishContent
+
+    prov = GoogleBusinessProvider.__new__(GoogleBusinessProvider)
+    prov.credentials = {"account_id": "accounts/1", "location_id": "accounts/1/locations/9"}
+    sent = {}
+
+    def fake(method, url, **kw):
+        sent.update(kw.get("json") or {})
+        r = MagicMock()
+        r.json.return_value = {"name": "accounts/1/locations/9/localPosts/5"}
+        return r
+
+    content = PublishContent(text="Novità", media_urls=["https://x/y.jpg"], post_type=PostType.IMAGE,
+                             extra={}, link_url="https://willybesmart.com/products/penna-kuromi")
+    with patch.object(GoogleBusinessProvider, "_request", side_effect=fake):
+        prov.publish_post("tok", content)
+    assert sent["callToAction"] == {"actionType": "LEARN_MORE",
+                                    "url": "https://willybesmart.com/products/penna-kuromi"}
+    assert sent["languageCode"] == "it"
