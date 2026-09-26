@@ -66,7 +66,8 @@ class PinterestProvider(SocialProvider):
 
     @property
     def required_scopes(self) -> list[str]:
-        return ["user_accounts:read", "boards:read", "pins:read", "pins:write"]
+        # boards:write: Pinterest lo chiede anche per POST /pins (401 «Missing: [boards:write]», 26/09/2026)
+        return ["user_accounts:read", "boards:read", "boards:write", "pins:read", "pins:write"]
 
     @property
     def rate_limits(self) -> RateLimitConfig:
