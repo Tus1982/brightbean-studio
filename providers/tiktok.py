@@ -54,6 +54,41 @@ VALID_PRIVACY_LEVELS = frozenset(
 # a self-hosted deployment TikTok will not audit. The trade: that endpoint takes
 # no ``post_info``, so caption, privacy and interaction settings are asked of the
 # creator inside the TikTok app and anything typed here does not travel.
+# [Willy 26/09/2026] A TikTok video without an audio track never leaves: TikTok is
+# watched with sound on, and a silent draft reached the creator and got published as
+# is. The error carries a fixed marker so the Willy side can pick the post up, add a
+# voice-over and ask for approval before trying again. ``allow_silent`` in the post's
+# platform_extra is the explicit escape hatch.
+SILENT_VIDEO_MARKER = "SILENT_VIDEO"
+SILENT_VIDEO_MESSAGE = (
+    f"{SILENT_VIDEO_MARKER}: the video has no audio track. TikTok videos need sound "
+    "(voice or music) before they are sent."
+)
+
+
+def has_audio_stream(source: str) -> bool | None:
+    """True/False from ffprobe; None when it cannot tell (no ffprobe, unreadable file).
+
+    None never blocks a publish: the check guards against silent videos, it must not
+    become a new way for a good video to fail.
+    """
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "a",
+             "-show_entries", "stream=codec_type", "-of", "csv=p=0", str(source)],
+            capture_output=True, text=True, timeout=60,
+        )
+    except Exception:
+        logger.warning("[TIKTOK] ffprobe unavailable: audio check skipped", exc_info=True)
+        return None
+    if result.returncode != 0:
+        logger.warning("[TIKTOK] ffprobe could not read %s: audio check skipped", source)
+        return None
+    return bool(result.stdout.strip())
+
+
 POST_MODE_DIRECT = "DIRECT_POST"
 POST_MODE_INBOX = "INBOX"
 VALID_POST_MODES = frozenset({POST_MODE_DIRECT, POST_MODE_INBOX})
@@ -294,6 +329,8 @@ class TikTokProvider(SocialProvider):
                 platform=self.platform_name,
             )
 
+        self._check_audio(content)
+
         post_mode = str(content.extra.get("post_mode") or POST_MODE_DIRECT).upper()
         if post_mode not in VALID_POST_MODES:
             raise PublishError(
@@ -530,6 +567,13 @@ class TikTokProvider(SocialProvider):
             timeout=120.0,
         )
         return publish_id
+
+    def _check_audio(self, content: PublishContent) -> None:
+        if content.extra.get("allow_silent"):
+            return
+        source = (content.media_files or content.media_urls or [None])[0]
+        if source and has_audio_stream(source) is False:
+            raise PublishError(SILENT_VIDEO_MESSAGE, platform=self.platform_name, retryable=False)
 
     def _publish_inbox(self, access_token: str, content: PublishContent) -> PublishResult:
         """Send the video to the creator's TikTok drafts (no audit required).

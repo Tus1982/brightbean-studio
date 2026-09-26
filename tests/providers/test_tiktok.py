@@ -751,3 +751,37 @@ class TestInboxPublishState:
         mock_request.side_effect = APIError("status endpoint down", status_code=503)
         provider = TikTokProvider({"client_key": "k", "client_secret": "s"})
         assert provider.inbox_publish_state("tok", "v_inbox_url~123") == "waiting"
+
+
+class TestSilentVideoGate:
+    """[Willy 26/09/2026] A video with no audio track is refused before any upload."""
+
+    def _content(self, **extra):
+        return PublishContent(text="x", media_files=["/tmp/v.mp4"], post_type=PostType.VIDEO,
+                              extra={"post_mode": "INBOX", **extra})
+
+    def test_silent_video_is_refused_and_not_retried(self):
+        provider = TikTokProvider({"client_key": "k", "client_secret": "s"})
+        with patch("providers.tiktok.has_audio_stream", return_value=False), \
+             patch.object(TikTokProvider, "_publish_inbox") as inbox:
+            with pytest.raises(PublishError) as err:
+                provider.publish_post("tok", self._content())
+        assert "SILENT_VIDEO" in str(err.value)
+        assert err.value.retryable is False
+        inbox.assert_not_called()
+
+    def test_video_with_sound_goes_through(self):
+        provider = TikTokProvider({"client_key": "k", "client_secret": "s"})
+        with patch("providers.tiktok.has_audio_stream", return_value=True), \
+             patch.object(TikTokProvider, "_publish_inbox", return_value="ok") as inbox:
+            assert provider.publish_post("tok", self._content()) == "ok"
+        inbox.assert_called_once()
+
+    def test_unknown_audio_and_escape_hatch_do_not_block(self):
+        provider = TikTokProvider({"client_key": "k", "client_secret": "s"})
+        with patch("providers.tiktok.has_audio_stream", return_value=None), \
+             patch.object(TikTokProvider, "_publish_inbox", return_value="ok"):
+            assert provider.publish_post("tok", self._content()) == "ok"
+        with patch("providers.tiktok.has_audio_stream", return_value=False), \
+             patch.object(TikTokProvider, "_publish_inbox", return_value="ok"):
+            assert provider.publish_post("tok", self._content(allow_silent=True)) == "ok"
