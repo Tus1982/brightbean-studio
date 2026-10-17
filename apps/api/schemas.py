@@ -419,6 +419,12 @@ class PostResponse(Schema):
             children = post.platform_posts.all()
         else:
             children = post.platform_posts.select_related("social_account")
+        # Keep the ordered media prefetch too: a new queryset would discard it
+        # and add one query per post in both REST and MCP list pages.
+        if "media_attachments" in getattr(post, "_prefetched_objects_cache", {}):
+            attachments = sorted(post.media_attachments.all(), key=lambda pm: pm.position)
+        else:
+            attachments = post.media_attachments.select_related("media_asset").order_by("position")
         from apps.composer.models import PlatformPost as _PlatformPost
 
         platform_posts = [PlatformPostSummary.from_platform_post(pp) for pp in children]
@@ -435,10 +441,7 @@ class PostResponse(Schema):
             proposed_publish_at=post.proposed_publish_at,
             status=post.status,
             platform_posts=platform_posts,
-            media=[
-                {"id": str(pm.media_asset_id), "media_type": pm.media_asset.media_type}
-                for pm in post.media_attachments.select_related("media_asset").order_by("position")
-            ],
+            media=[{"id": str(pm.media_asset_id), "media_type": pm.media_asset.media_type} for pm in attachments],
             created_at=post.created_at,
             updated_at=post.updated_at,
             editable_fields=list(PATCH_FIELDS) if post.is_editable and not sent else [],
