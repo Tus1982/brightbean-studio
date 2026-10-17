@@ -81,3 +81,33 @@ ruff check . && ruff format --check .
 Design reviewed by Codex before implementation (it caught the
 `published`-vs-`awaiting_creator` lie, the duration guard hidden inside the
 privacy check, and the retry that would burn pending upload slots).
+
+## Calendar edit of the same post (Willy, 17/10/2026)
+
+Willy's Studio edits a calendar exit in place, so `PATCH /api/v1/posts/{id}` also takes
+`post_type` (`post` / `story` / `reel`), `social_account_ids` (the complete target set) and
+`apply_text_to_platforms` (default `false`). Old clients that send none of them get the old
+behaviour. Reads add `editable_fields` to the post and `platform_specific_title` /
+`platform_specific_caption` / `platform_specific_first_comment` to each platform post;
+`platform_extra` is unchanged.
+
+| File | Change |
+|---|---|
+| `apps/api/schemas.py` | the three PATCH fields, `PATCH_FIELDS`, `editable_fields`, override texts on `PlatformPostSummary` |
+| `apps/api/routers/posts.py` | `_plan_destinations()` / `_check_surface()`; PATCH locks parent + children and checks before any write |
+| `apps/api/tests/test_calendar_edit_destinations.py` | tests for the above |
+
+Rules that must survive a merge: same post id, never a clone; kept children keep id, options,
+schedule and texts; any published / publishing / awaiting_creator child makes surface, accounts
+and shared text read-only; only all-draft or all-scheduled posts change structure; a scheduled
+one needs `publish_directly`, the approval gate and the platform quota, like `/schedule`; a story
+needs vertical media on Instagram/Facebook, a reel or a TikTok account needs a real video (nothing
+is converted); a new Pinterest account is refused because no board may be invented.
+
+Local verification: 75 Django API tests passed on isolated SQLite memory (calendar edit,
+story/reel, routers, text overrides); this is not proof of PostgreSQL row locking.
+Root review added parent refetch and full account/status rechecks on locked children.
+CI now also runs for the actual production branch `tiktok-inbox-mode`, with its existing
+PostgreSQL 16 service. The separate CI maintenance commit formats the prior fork changes
+and corrects two pre-existing typing errors without changing provider behaviour.
+Deployment must follow successful CI. No real post was changed as a test.

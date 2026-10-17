@@ -39,7 +39,7 @@ from apps.api.schemas import (
     ScheduleRequest,
     UpdatePostRequest,
 )
-from apps.composer.models import Post
+from apps.composer.models import PlatformPost, Post
 from apps.composer.services import (
     create_post,
     sync_post_scheduled_at,
@@ -168,6 +168,139 @@ def _get_workspace_post(request: HttpRequest, post_id: uuid.UUID) -> Post:
     if not pp_account_ids or not pp_account_ids.issubset(allowed_ids):
         raise Http404()
     return post
+
+
+#: [Willy 17/10/2026] Edit surface/destinations of an existing post (PATCH).
+#: Stories only where the engine publishes them; these platforms publish only video.
+STORY_PLATFORMS = ("instagram", "instagram_login", "facebook")
+VIDEO_ONLY_PLATFORMS = ("tiktok",)
+
+
+def _surface_of(pp) -> str:
+    return (pp.platform_extra or {}).get("post_type") or "post"
+
+
+def _needs_reconnect(account) -> bool:
+    value = getattr(account, "needs_reconnect", False)
+    return bool(value() if callable(value) else value)
+
+
+def _check_surface(account, surface: str, media: list) -> None:
+    """The create rule for a surface, plus the media it is made of. Never converts media."""
+    if surface in API_POST_TYPES:
+        _validate_post_type(surface, account)
+        if not media:
+            raise HttpError(422, f"A {surface} needs at least one media asset.")
+    if surface == "story":
+        if account.platform not in STORY_PLATFORMS:
+            raise HttpError(422, f"{account.platform} does not publish stories.")
+        # 9:16 (1080x1920) within a small tolerance: a 4:5 feed image is not a story.
+        if any(not (a.width and a.height and a.height * 10 >= a.width * 17) for a in media):
+            raise HttpError(422, "A story needs vertical 9:16 media; the feed image is not reused as a story.")
+    needs_video = surface == "reel" or account.platform in VIDEO_ONLY_PLATFORMS
+    if needs_video and (not media or any(a.media_type != "video" for a in media)):
+        raise HttpError(422, f"{account.platform} {surface} needs a real video: an image is not converted.")
+
+
+def _plan_destinations(request: HttpRequest, post: Post, children: list, payload, media: list) -> dict:
+    """Validate a surface/destination change against the LOCKED rows. Reads only, no writes."""
+    # Recheck the complete allowlist on locked children: an account could have been
+    # attached after _get_workspace_post ran. A removed foreign child is still foreign.
+    from django.http import Http404
+    from django.utils import timezone
+
+    from apps.composer.services import _require_approval_gate_passes
+
+    allowed = {sa.id for sa in request.api_key.social_accounts.all()}  # type: ignore[attr-defined]
+    if not children or not {pp.social_account_id for pp in children} <= allowed:
+        raise Http404()
+    if any(pp.status in PlatformPost.PROTECTED_STATUSES or pp.published_at for pp in children):
+        raise HttpError(
+            409,
+            "A platform post is published, publishing or in the creator's drafts: "
+            "surface, destinations and shared texts are read-only.",
+        )
+    if any(pp.status not in ("draft", "changes_requested", "rejected", "approved", "scheduled") for pp in children):
+        raise HttpError(409, "A platform post is in review or unavailable for editing.")
+    structural = payload.post_type is not None or payload.social_account_ids is not None
+    if not structural:
+        return {"structural": False}
+    statuses = {pp.status for pp in children}
+    if statuses not in ({"draft"}, {"scheduled"}):
+        raise HttpError(
+            409, "Surface and destinations change only while every platform post is a draft, or every one is scheduled."
+        )
+    scheduled = statuses == {"scheduled"}
+    when = None
+    if scheduled:
+        # Same contract as the schedule route: permission, approval gate, quota.
+        _require_perm(request, "publish_directly")
+        times = {pp.scheduled_at for pp in children}
+        if payload.scheduled_at is None and len(times) != 1:
+            raise HttpError(409, "Platform posts are scheduled at different times: send scheduled_at.")
+        when = payload.scheduled_at or next(iter(times))
+        if when is None or when <= timezone.now():
+            raise HttpError(422, "A scheduled post keeps a future scheduled_at.")
+        try:
+            _require_approval_gate_passes(post.workspace)
+        except ValueError as exc:
+            raise HttpError(422, str(exc)) from exc
+
+    wanted = None
+    if payload.post_type is not None:
+        wanted = str(payload.post_type).strip().lower()
+        if wanted not in ("post", *API_POST_TYPES):
+            raise HttpError(422, f"post_type must be one of {['post', *API_POST_TYPES]}; got {payload.post_type!r}.")
+
+    current = {pp.social_account_id: pp for pp in children}
+    if payload.social_account_ids is None:
+        target_ids = list(current)
+    else:
+        target_ids = list(payload.social_account_ids)
+        if not target_ids:
+            raise HttpError(422, "social_account_ids needs at least one account.")
+        if len(set(target_ids)) != len(target_ids):
+            raise HttpError(422, "social_account_ids contains duplicates.")
+    allowlist = {sa.id for sa in request.api_key.social_accounts.all()}  # type: ignore[attr-defined]
+    if not set(target_ids) <= allowlist:
+        raise HttpError(403, "SocialAccount is not in this key's allowlist.")
+    accounts = {sa.id: sa for sa in SocialAccount.objects.filter(id__in=target_ids, workspace_id=post.workspace_id)}
+    if len(accounts) != len(target_ids):
+        raise HttpError(403, "SocialAccount is not in this workspace.")
+
+    added = [i for i in target_ids if i not in current]
+    kept_surfaces = {_surface_of(pp) for pp in children}
+    media_changed = payload.media_asset_ids is not None
+    surfaces = {}
+    for account_id in target_ids:
+        account = accounts[account_id]
+        if account_id in current:
+            surface = wanted or _surface_of(current[account_id])
+        else:
+            if wanted is None and len(kept_surfaces) != 1:
+                raise HttpError(422, "The platform posts have different surfaces: send post_type for new accounts.")
+            surface = wanted or next(iter(kept_surfaces))
+            if _needs_reconnect(account):
+                raise HttpError(422, f"SocialAccount {account.id} must be reconnected before it is added.")
+            if account.platform == "pinterest":
+                # A Pin needs a board and nothing here may invent one.
+                raise HttpError(422, "A Pinterest account needs a board_id: create its post with board_id instead.")
+        if account_id not in current or surface != _surface_of(current[account_id]) or media_changed:
+            _check_surface(account, surface, media)
+        surfaces[account_id] = surface
+    if scheduled:
+        for account_id in added:
+            check_platform_quota(accounts[account_id])
+    return {
+        "structural": True,
+        "scheduled": scheduled,
+        "when": when,
+        "accounts": accounts,
+        "added": added,
+        "kept": [pp for i, pp in current.items() if i in accounts],
+        "removed": [pp for i, pp in current.items() if i not in accounts],
+        "surfaces": surfaces,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -409,6 +542,52 @@ def update(request, post_id: uuid.UUID, payload: UpdatePostRequest):
             raise HttpError(422, f"Media asset(s) not in workspace: {missing}")
 
     with transaction.atomic():
+        # [Willy 17/10/2026] Surface / destinations of the SAME post. Lock parent and
+        # children first, then run every definitive check on the locked rows: a 4xx
+        # raised here rolls back before any write.
+        plan = None
+        if payload.post_type is not None or payload.social_account_ids is not None or payload.apply_text_to_platforms:
+            post = Post.objects.select_for_update().get(id=post.id)
+            if not post.is_editable:
+                raise HttpError(409, f"Post is not editable in status {post.status}.")
+            children = list(
+                PlatformPost.objects.select_for_update(of=("self",))
+                .filter(post_id=post.id)
+                .select_related("social_account")
+                .order_by("created_at")
+            )
+            if payload.media_asset_ids is not None:
+                final_media = [resolved_assets[i] for i in wanted_media]
+            else:
+                final_media = [
+                    pm.media_asset for pm in post.media_attachments.select_related("media_asset").order_by("position")
+                ]
+            plan = _plan_destinations(request, post, children, payload, final_media)
+        if plan and plan["structural"]:
+            for pp in plan["removed"]:
+                # Only draft/scheduled children reach here: never a sent one.
+                from apps.calendar.models import QueueEntry
+
+                QueueEntry.objects.filter(post=post, queue__social_account_id=pp.social_account_id).delete()
+                pp.delete()
+            for pp in plan["kept"]:
+                surface = plan["surfaces"][pp.social_account_id]
+                if surface != _surface_of(pp):
+                    extra = dict(pp.platform_extra or {})
+                    extra.pop("post_type", None)
+                    if surface != "post":
+                        extra["post_type"] = surface
+                    pp.platform_extra = extra
+                    pp.save(update_fields=["platform_extra", "updated_at"])
+            for account_id in plan["added"]:
+                surface = plan["surfaces"][account_id]
+                PlatformPost.objects.create(
+                    post=post,
+                    social_account=plan["accounts"][account_id],
+                    status="scheduled" if plan["scheduled"] else "draft",
+                    scheduled_at=plan["when"] if plan["scheduled"] else None,
+                    platform_extra={"post_type": surface} if surface != "post" else {},
+                )
         update_fields: list[str] = []
         if payload.caption is not None:
             post.caption = payload.caption
@@ -456,8 +635,23 @@ def update(request, post_id: uuid.UUID, payload: UpdatePostRequest):
         if update_fields:
             post.save(update_fields=[*update_fields, "updated_at"])
 
+        if plan is not None and payload.apply_text_to_platforms:
+            # Only the overrides of the texts sent in THIS request; options stay intact.
+            cleared = {
+                f"platform_specific_{field}": None
+                for field in ("title", "caption", "first_comment")
+                if getattr(payload, field) is not None
+            }
+            if cleared:
+                from django.utils import timezone as _tz
+
+                PlatformPost.objects.filter(post_id=post.id).update(**cleared, updated_at=_tz.now())
+
         sync_post_scheduled_at(post)
 
+    if plan is not None:
+        # The prefetched children are stale after a destination change.
+        post = Post.objects.prefetch_related("platform_posts__social_account").get(id=post.id)
     post.refresh_from_db()
     log_audit_entry(request, action="post.update", target_id=post.id, status_code=200)
     return _post_to_response(request, post)
