@@ -424,7 +424,7 @@ class PostResponse(Schema):
         if "media_attachments" in getattr(post, "_prefetched_objects_cache", {}):
             attachments = sorted(post.media_attachments.all(), key=lambda pm: pm.position)
         else:
-            attachments = post.media_attachments.select_related("media_asset").order_by("position")
+            attachments = list(post.media_attachments.select_related("media_asset").order_by("position"))
         from apps.composer.models import PlatformPost as _PlatformPost
 
         platform_posts = [PlatformPostSummary.from_platform_post(pp) for pp in children]
