@@ -492,6 +492,8 @@ class TestListPostsTool:
             scheduled_at=timezone.now() + timedelta(days=30),
         )
 
+        # Keep distinct creation times even on clocks with millisecond resolution.
+        Post.objects.filter(id=older_draft.id).update(created_at=timezone.now() - timedelta(hours=1))
         inner = _list_posts(client_with_token)
         assert [p["id"] for p in inner["posts"]] == [str(newer_scheduled.id), str(older_draft.id)]
 

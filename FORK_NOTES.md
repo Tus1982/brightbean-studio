@@ -111,3 +111,11 @@ CI now also runs for the actual production branch `tiktok-inbox-mode`, with its 
 PostgreSQL 16 service. The separate CI maintenance commit formats the prior fork changes
 and corrects two pre-existing typing errors without changing provider behaviour.
 Deployment must follow successful CI. No real post was changed as a test.
+
+Full PostgreSQL CI exposed six failures in the previously untested production branch:
+four old TikTok form fixtures omitted the now-required explicit mode field; a Facebook
+test used a historical date against the real clock; and PostResponse discarded the media
+prefetch on list serialization. Fixtures now mirror the real INBOX form and freeze the
+clock; the serializer reuses its ordered media prefetch. No publish permission or
+provider mode has changed. Baseline comparison and final CI are recorded in the Willy
+Studio release note.

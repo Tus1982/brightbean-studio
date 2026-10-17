@@ -203,6 +203,7 @@ class TikTokExtrasSyncTests(AccountScopeTestsBase):
     def _tiktok_payload(self, **tiktok_fields):
         acc = str(self.tiktok.id)
         payload = self._payload()
+        payload[f"tiktok_post_mode_{acc}"] = "INBOX"
         payload.update({f"tiktok_{key}_{acc}": value for key, value in tiktok_fields.items()})
         return payload
 

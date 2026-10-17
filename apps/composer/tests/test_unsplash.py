@@ -382,6 +382,7 @@ class TiktokCoverTimestampTests(ComposerTestCase):
             "action": "save_draft",
             "caption": "body",
             "selected_accounts": str(self.account.id),
+            f"tiktok_post_mode_{self.account.id}": "INBOX",
             f"tiktok_privacy_level_{self.account.id}": "PUBLIC_TO_EVERYONE",
         }
         if cover_value is not None:
