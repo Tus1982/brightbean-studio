@@ -283,9 +283,7 @@ class PinterestProvider(SocialProvider):
         status = ""
         for _ in range(60):
             status = (
-                self._request("GET", f"{API_BASE}/media/{media_id}", access_token=access_token)
-                .json()
-                .get("status", "")
+                self._request("GET", f"{API_BASE}/media/{media_id}", access_token=access_token).json().get("status", "")
             )
             if status in ("succeeded", "failed"):
                 break

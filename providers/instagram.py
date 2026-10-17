@@ -105,7 +105,6 @@ CONTAINER_POLL_INTERVAL = 2  # seconds
 CONTAINER_POLL_MAX_ATTEMPTS = 60
 
 
-
 # A presigned R2/S3 URL ends in ``?X-Amz-...``, not in ``.mp4``: checking the whole
 # string sent every stored video to Instagram as ``image_url``, and Instagram then
 # published the first frame as a still (a Reel reposted as a Story showed only its

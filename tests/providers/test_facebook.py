@@ -886,12 +886,17 @@ def _comment(comment_id="comment-1", created="2026-08-07T09:00:00+0000", author_
     }
 
 
-def test_fetch_post_comments_uses_field_expansion_and_does_not_pass_caller_since_to_the_feed():
+def test_fetch_post_comments_uses_field_expansion_and_does_not_pass_caller_since_to_the_feed(monkeypatch):
     """`since` on /feed filters by POST time, so passing the caller's `since`
     would hide every new comment on an older post."""
     provider = FacebookProvider({"client_id": "id", "client_secret": "secret", "page_id": "page-1"})
     provider._request = MagicMock(return_value=_feed_response([_comment()]))
 
+    # A fixed comment fixture needs a fixed clock: the real 30-day feed window
+    # otherwise moves past this historical date as the test suite ages.
+    clock = MagicMock(wraps=datetime)
+    clock.now.return_value = datetime(2026, 8, 7, 12, 0, tzinfo=UTC)
+    monkeypatch.setattr("providers.facebook.datetime", clock)
     since = datetime(2026, 8, 7, 8, 0, tzinfo=UTC)
     messages = provider._fetch_post_comments("page-token", since=since)
 
