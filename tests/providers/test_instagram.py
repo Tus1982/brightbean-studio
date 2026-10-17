@@ -1089,8 +1089,7 @@ def test_a_feed_post_keeps_the_feed_metrics():
     from providers import instagram as ig
 
     provider = ig.InstagramProvider({"client_id": "id", "client_secret": "secret"})
-    provider._get_media_fields = MagicMock(return_value={"media_product_type": "FEED",
-                                                         "like_count": 9})
+    provider._get_media_fields = MagicMock(return_value={"media_product_type": "FEED", "like_count": 9})
     visti = {}
 
     def _finto(_req, *, platform, endpoint, access_token, metrics, endpoint_type):

@@ -31,10 +31,13 @@ def list_accounts(request):
 def pinterest_boards(request, account_id: str):
     """The boards a Pin can go to. The API needs them because creating a Pinterest
     post requires ``board_id``; the composer has its own session-only twin."""
+    from typing import cast
+
     from ninja.errors import HttpError
 
     from apps.credentials.models import resolve_platform_credentials
     from providers import get_provider
+    from providers.pinterest import PinterestProvider
 
     enforce_http_rate_limits(request, is_write=False)
     account = request.api_key.social_accounts.filter(id=account_id, platform="pinterest").first()
@@ -49,7 +52,7 @@ def pinterest_boards(request, account_id: str):
         except Exception as exc:
             raise HttpError(502, "Token refresh failed") from exc
     try:
-        boards = provider.get_boards(access_token)
+        boards = cast(PinterestProvider, provider).get_boards(access_token)
     except Exception as exc:
         raise HttpError(502, "Failed to fetch boards") from exc
     log_audit_entry(request, action="accounts.pinterest_boards", target_id=account.id, status_code=200)

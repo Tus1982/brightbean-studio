@@ -12,7 +12,6 @@ time. What these tests hold still:
 """
 
 import json
-import uuid
 
 import pytest
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -139,8 +138,6 @@ def _create(client, account, **extra):
     return client.post("/api/v1/posts/", data=json.dumps(body), content_type="application/json")
 
 
-
-
 @pytest.fixture
 def pinterest_account(db, workspace):
     return _account(workspace, "pinterest", "pi-1")
@@ -150,8 +147,14 @@ def pinterest_account(db, workspace):
 class TestPinterestBoard:
     def test_board_and_link_land_in_platform_extra(self, client_for, pinterest_account, image_asset):
         client = client_for(pinterest_account)
-        r = _create(client, pinterest_account, title="Un Pin", media_asset_ids=[str(image_asset.id)],
-                    board_id="board-42", link_url="https://willybesmart.com/products/x")
+        r = _create(
+            client,
+            pinterest_account,
+            title="Un Pin",
+            media_asset_ids=[str(image_asset.id)],
+            board_id="board-42",
+            link_url="https://willybesmart.com/products/x",
+        )
         assert r.status_code == 201, r.content
         pp = PlatformPost.objects.get(social_account=pinterest_account)
         assert pp.platform_extra == {"board_id": "board-42", "link_url": "https://willybesmart.com/products/x"}
@@ -180,8 +183,9 @@ class TestPinterestBoard:
     def test_boards_endpoint_lists_boards(self, client_for, pinterest_account, monkeypatch):
         from providers.pinterest import PinterestProvider
 
-        monkeypatch.setattr(PinterestProvider, "get_boards",
-                            lambda self, token: [{"id": "b1", "name": "Cartoleria e scrivania"}])
+        monkeypatch.setattr(
+            PinterestProvider, "get_boards", lambda self, token: [{"id": "b1", "name": "Cartoleria e scrivania"}]
+        )
         client = client_for(pinterest_account)
         r = client.get(f"/api/v1/accounts/{pinterest_account.id}/pinterest/boards")
         assert r.status_code == 200, r.content

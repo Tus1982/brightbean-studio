@@ -77,10 +77,14 @@ def test_link_diventa_bottone_e_post_in_italiano():
         r.json.return_value = {"name": "accounts/1/locations/9/localPosts/5"}
         return r
 
-    content = PublishContent(text="Novità", media_urls=["https://x/y.jpg"], post_type=PostType.IMAGE,
-                             extra={}, link_url="https://willybesmart.com/products/penna-kuromi")
+    content = PublishContent(
+        text="Novità",
+        media_urls=["https://x/y.jpg"],
+        post_type=PostType.IMAGE,
+        extra={},
+        link_url="https://willybesmart.com/products/penna-kuromi",
+    )
     with patch.object(GoogleBusinessProvider, "_request", side_effect=fake):
         prov.publish_post("tok", content)
-    assert sent["callToAction"] == {"actionType": "LEARN_MORE",
-                                    "url": "https://willybesmart.com/products/penna-kuromi"}
+    assert sent["callToAction"] == {"actionType": "LEARN_MORE", "url": "https://willybesmart.com/products/penna-kuromi"}
     assert sent["languageCode"] == "it"

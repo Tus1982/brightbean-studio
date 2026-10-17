@@ -76,9 +76,21 @@ def has_audio_stream(source: str) -> bool | None:
 
     try:
         result = subprocess.run(
-            ["ffprobe", "-v", "error", "-select_streams", "a",
-             "-show_entries", "stream=codec_type", "-of", "csv=p=0", str(source)],
-            capture_output=True, text=True, timeout=60,
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "a",
+                "-show_entries",
+                "stream=codec_type",
+                "-of",
+                "csv=p=0",
+                str(source),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
         )
     except Exception:
         logger.warning("[TIKTOK] ffprobe unavailable: audio check skipped", exc_info=True)
@@ -571,7 +583,8 @@ class TikTokProvider(SocialProvider):
     def _check_audio(self, content: PublishContent) -> None:
         if content.extra.get("allow_silent"):
             return
-        source = (content.media_files or content.media_urls or [None])[0]
+        sources = content.media_files or content.media_urls
+        source = sources[0] if sources else None
         if source and has_audio_stream(source) is False:
             raise PublishError(SILENT_VIDEO_MESSAGE, platform=self.platform_name, retryable=False)
 
