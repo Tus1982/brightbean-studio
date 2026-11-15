@@ -6,6 +6,7 @@ HUMAN_AGENT tag once the incoming message is more than 24 hours old.
 """
 
 from unittest.mock import MagicMock
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 
@@ -143,17 +144,17 @@ def test_facebook_dm_reply_refuses_without_a_recipient():
     provider._request.assert_not_called()
 
 
-def test_instagram_via_facebook_offers_no_dm_surface():
-    """That OAuth flow never requests instagram_manage_messages.
+def test_instagram_via_facebook_sends_to_the_linked_page():
+    provider = InstagramProvider({**CREDS, "ig_user_id": "ig-1", "page_id": "page-77"})
+    provider._request = MagicMock(return_value=_resp({"message_id": "mid.out"}))
 
-    Leaving the method in place would produce runtime API rejections instead of
-    a clear "this connection cannot do DMs". ``get_messages`` is not part of
-    this: it polls comments, which the connection *can* read.
-    """
-    provider = InstagramProvider({**CREDS, "ig_user_id": "ig-1"})
+    result = provider.reply_to_message("page-token", "mid.in", "Hi", extra={"sender_id": "igsid-2"})
 
-    with pytest.raises(NotImplementedError):
-        provider.reply_to_message("token", "mid.in", "Hi", extra={"sender_id": "igsid-2"})
+    assert result.platform_message_id == "mid.out"
+    call = provider._request.call_args
+    assert call.args == ("POST", "https://graph.facebook.com/v25.0/page-77/messages")
+    assert call.kwargs["json"]["recipient"] == {"id": "igsid-2"}
+    assert call.kwargs["access_token"] == "page-token"
 
 
 def test_instagram_via_facebook_does_not_subscribe_to_messages():
@@ -192,15 +193,20 @@ def test_instagram_login_dm_reply_refuses_without_a_recipient():
 
 def test_facebook_subscribes_page_to_feed_mention_and_messages():
     provider = FacebookProvider(CREDS)
-    provider._request = MagicMock(return_value=_resp({"success": True}))
+    provider._request = MagicMock(
+        side_effect=[
+            _resp({"data": []}),
+            _resp({"success": True}),
+            _resp({"data": [{"id": "id", "subscribed_fields": ["feed", "mention", "messages"]}]}),
+        ]
+    )
 
     assert provider.subscribe_webhooks("page-token", "page-1") is True
-    provider._request.assert_called_once_with(
-        "POST",
-        "https://graph.facebook.com/v25.0/page-1/subscribed_apps",
-        access_token="page-token",
-        params={"subscribed_fields": "feed,mention,messages"},
-    )
+    assert provider._request.call_count == 3
+    call = provider._request.call_args_list[1]
+    assert call.args == ("POST", "https://graph.facebook.com/v25.0/page-1/subscribed_apps")
+    assert call.kwargs["access_token"] == "page-token"
+    assert set(call.kwargs["params"]["subscribed_fields"].split(",")) == {"feed", "mention", "messages"}
 
 
 def test_facebook_unsubscribe_deletes_the_subscription():
@@ -291,12 +297,12 @@ def test_facebook_polled_messages_carry_the_sender_psid():
 def test_the_recipient_resolver_is_shared_by_the_messaging_providers():
     """One resolver, so a new payload shape is taught in one place.
 
-    Instagram-via-Facebook is absent on purpose: that flow has no DM surface,
-    because it never requests instagram_manage_messages.
+    All three Meta messaging providers use the same recipient resolver.
     """
-    from providers import facebook, instagram_login
+    from providers import facebook, instagram, instagram_login
     from providers.meta_messaging import resolve_recipient_id
 
+    assert instagram.resolve_recipient_id is resolve_recipient_id
     assert facebook.resolve_recipient_id is resolve_recipient_id
     assert instagram_login.resolve_recipient_id is resolve_recipient_id
 
@@ -463,3 +469,87 @@ def test_instagram_login_without_its_own_id_keeps_every_message():
     provider._fetch_media_comments = MagicMock(return_value=[])
 
     assert len(provider.get_messages("token")) == 1
+
+
+# --------------------------------------------------- re-requesting permissions
+
+
+def test_facebook_auth_url_rerequests_declined_permissions():
+    """Without auth_type=rerequest Meta skips the dialog on a reconnect.
+
+    A user who declined a scope could then never be asked again, and the
+    connection silently lacks the ability it advertises.
+    """
+    provider = FacebookProvider(CREDS)
+    url = provider.get_auth_url("https://studio.example/cb", "state-1")
+
+    assert parse_qs(urlparse(url).query)["auth_type"] == ["rerequest"]
+
+
+def test_instagram_auth_url_rerequests_declined_permissions():
+    provider = InstagramProvider(CREDS)
+    url = provider.get_auth_url("https://studio.example/cb", "state-1")
+
+    assert parse_qs(urlparse(url).query)["auth_type"] == ["rerequest"]
+
+
+def test_instagram_login_auth_url_carries_no_facebook_only_params():
+    """auth_type belongs to the facebook.com dialog, not Instagram's own.
+
+    Sending parameters the Instagram-hosted dialog does not document risks it
+    rejecting the request outright, so the shared helper must not reach here.
+    """
+    provider = InstagramLoginProvider(CREDS)
+    query = parse_qs(urlparse(provider.get_auth_url("https://studio.example/cb", "state-1")).query)
+
+    assert "auth_type" not in query
+
+
+# ------------------------------------------------------ granted-scope readback
+
+
+def test_granted_scopes_inspect_the_token_not_me_permissions():
+    """These accounts hold a *Page* token, so /me resolves to the Page, which
+    has no permissions edge. debug_token reports any token's scopes."""
+    provider = FacebookProvider(CREDS)
+    provider._request = MagicMock(
+        return_value=_resp({"data": {"is_valid": True, "scopes": ["pages_show_list", "pages_manage_posts"]}})
+    )
+
+    assert provider.get_granted_scopes("page-token") == {"pages_show_list", "pages_manage_posts"}
+    provider._request.assert_called_once_with(
+        "GET",
+        "https://graph.facebook.com/v25.0/debug_token",
+        params={"input_token": "page-token", "access_token": "id|secret"},
+    )
+
+
+def test_granted_scopes_need_app_credentials_to_ask():
+    """debug_token requires an app token; without one the answer is unknown."""
+    provider = FacebookProvider({"client_id": "id"})
+
+    assert provider.get_granted_scopes("token") is None
+
+
+def test_a_token_meta_will_not_describe_is_unknown_not_unscoped():
+    """An empty set would report every scope as missing and demand a reconnect."""
+    provider = FacebookProvider(CREDS)
+    provider._request = MagicMock(return_value=_resp({"data": {"is_valid": False}}))
+
+    assert provider.get_granted_scopes("token") is None
+
+
+def test_a_failed_readback_is_unknown_not_empty():
+    from providers.exceptions import RateLimitError
+
+    provider = FacebookProvider(CREDS)
+    provider._request = MagicMock(side_effect=RateLimitError("slow down", platform="facebook"))
+
+    assert provider.get_granted_scopes("token") is None
+
+
+def test_providers_that_cannot_be_asked_report_unknown():
+    from providers.bluesky import BlueskyProvider
+
+    assert BlueskyProvider(CREDS).get_granted_scopes("token") is None
+    assert InstagramLoginProvider(CREDS).get_granted_scopes("token") is None

@@ -22,12 +22,24 @@ _WORKFLOW_ORDER = [
     "approved",
     "scheduled",
     "publishing",
+    # Waiting on a human inside TikTok: more advanced than "publishing", but
+    # not an outcome, so it ranks below the terminal states and a mixed post
+    # surfaces as still-in-flight.
+    "awaiting_creator",
     "partially_published",
     "published",
 ]
 
 # Statuses considered "terminal publishing outcomes".
 _TERMINAL = {"published", "failed"}
+
+# Aggregate statuses where the post is live (or going live) and the composer
+# must stop offering to change it. Deliberately narrower than
+# ``Post.is_editable``, which also excludes ``failed``, ``pending_review``,
+# ``pending_client`` and ``on_hold``: a failed channel still needs its publish
+# affordances to retry, and a post out for review is still being worked on.
+# Clone is the escape hatch for anything in here.
+READONLY_STATUSES = frozenset({"publishing", "partially_published", "published"})
 
 
 def derive_post_status(statuses):

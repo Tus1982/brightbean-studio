@@ -9,7 +9,11 @@ import pytest
 
 from providers.exceptions import APIError, PublishError
 from providers.tiktok import TikTokProvider
-from providers.types import PostType, PublishContent
+from providers.types import PostType, PublishContent, PublishState
+
+# [fork Willy]
+INBOX_INIT_URL = "https://open.tiktokapis.com/v2/post/publish/inbox/video/init/"
+STATUS_FETCH_URL = "https://open.tiktokapis.com/v2/post/publish/status/fetch/"
 
 
 def _make_response(payload: dict) -> MagicMock:
@@ -610,3 +614,278 @@ class TestPublishPost:
 
         assert excinfo.value.retryable is False
         mock_request.assert_not_called()
+
+
+class TestCheckPublishStatus:
+    """TikTok only accepts the upload; publishing happens afterwards."""
+
+    def test_provider_declares_async_publish(self):
+        assert TikTokProvider({"client_key": "k", "client_secret": "s"}).publish_is_async is True
+
+    @patch.object(TikTokProvider, "_request")
+    def test_complete_returns_the_real_video_id(self, mock_request):
+        mock_request.return_value = _make_response(
+            {"data": {"status": "PUBLISH_COMPLETE", "publicaly_available_post_id": [7412345678901234567]}}
+        )
+        status = TikTokProvider({}).check_publish_status("tok", "v_pub_file~abc")
+
+        assert status.state is PublishState.COMPLETE
+        assert status.platform_post_id == "7412345678901234567"
+        assert status.error == ""
+
+    @patch.object(TikTokProvider, "_request")
+    def test_failed_carries_tiktoks_own_reason(self, mock_request):
+        mock_request.return_value = _make_response(
+            {"data": {"status": "FAILED", "fail_reason": "video_format_check_failed"}}
+        )
+        status = TikTokProvider({}).check_publish_status("tok", "v_pub_file~abc")
+
+        assert status.state is PublishState.FAILED
+        assert "video_format_check_failed" in status.error
+
+    @patch.object(TikTokProvider, "_request")
+    def test_processing_is_pending_not_an_outcome(self, mock_request):
+        mock_request.return_value = _make_response({"data": {"status": "PROCESSING_UPLOAD"}})
+
+        assert TikTokProvider({}).check_publish_status("tok", "v_pub_file~abc").state is PublishState.PENDING
+
+    @patch.object(TikTokProvider, "_request")
+    def test_unknown_future_status_is_pending_not_failed(self, mock_request):
+        """A status TikTok adds later must make us wait, not declare an outcome."""
+        mock_request.return_value = _make_response({"data": {"status": "SOMETHING_NEW"}})
+
+        assert TikTokProvider({}).check_publish_status("tok", "v_pub_file~abc").state is PublishState.PENDING
+
+    @patch.object(TikTokProvider, "_request")
+    def test_inbox_tells_the_user_to_finish_in_the_app(self, mock_request):
+        mock_request.return_value = _make_response({"data": {"status": "SEND_TO_USER_INBOX"}})
+        status = TikTokProvider({}).check_publish_status("tok", "v_inbox_file~abc")
+
+        assert status.state is PublishState.INBOX
+        assert "TikTok app" in status.error
+
+
+class TestFileUploadStreaming:
+    """The video is streamed off disk, never read into memory."""
+
+    @patch.object(TikTokProvider, "_check_creator_constraints", side_effect=lambda t, p, c, **kw: p)
+    @patch.object(TikTokProvider, "_request")
+    def test_upload_body_is_a_file_object_with_content_length(self, mock_request, _constraints, tmp_path):
+        video = tmp_path / "clip.mp4"
+        video.write_bytes(b"\0" * 2048)
+        mock_request.return_value = _make_response(
+            {"data": {"publish_id": "v_pub_file~x", "upload_url": "https://upload.tiktok/x"}}
+        )
+
+        TikTokProvider({}).publish_post(
+            "tok",
+            PublishContent(text="hi", post_type=PostType.VIDEO, media_files=[str(video)]),
+        )
+
+        put_call = [c for c in mock_request.call_args_list if c.args[0] == "PUT"][0]
+        body = put_call.kwargs["data"]
+        assert hasattr(body, "read"), "video must be handed to httpx as a stream, not bytes"
+        assert put_call.kwargs["headers"]["Content-Length"] == "2048"
+
+    @patch.object(TikTokProvider, "_check_creator_constraints", side_effect=lambda t, p, c, **kw: p)
+    @patch.object(TikTokProvider, "_request")
+    def test_oversize_video_fails_permanently_with_the_real_reason(self, mock_request, _constraints, tmp_path):
+        """Retrying can't shrink the file; burning the budget hides why it failed."""
+        video = tmp_path / "huge.mp4"
+        video.write_bytes(b"\0" * 16)
+
+        with (
+            patch("providers.tiktok.os.path.getsize", return_value=90_000_000),
+            pytest.raises(PublishError) as exc,
+        ):
+            TikTokProvider({}).publish_post(
+                "tok",
+                PublishContent(text="hi", post_type=PostType.VIDEO, media_files=[str(video)]),
+            )
+
+        assert exc.value.retryable is False
+        assert "90 MB" in str(exc.value)
+        assert "64 MB" in str(exc.value)
+        mock_request.assert_not_called()
+
+
+class TestPublishToInbox:
+    """Upload mode: the video goes to the creator's TikTok drafts.
+
+    This is the only route an unaudited app has on a public account, so these
+    tests pin the two things that make it work: the inbox endpoint, and a
+    payload with no ``post_info`` (TikTok rejects one, and privacy/interaction
+    settings are asked of the creator inside the app).
+    """
+
+    @patch.object(TikTokProvider, "_request")
+    def test_inbox_mode_hits_inbox_endpoint_without_post_info(self, mock_request):
+        mock_request.side_effect = [
+            _creator_info_response(["SELF_ONLY"]),
+            _make_response({"data": {"publish_id": "v_inbox_url~123"}}),
+        ]
+
+        provider = TikTokProvider({"client_key": "k", "client_secret": "s"})
+        result = provider.publish_post("tok", _video_content(post_mode="INBOX"))
+
+        urls = [call.args[1] for call in mock_request.call_args_list]
+        assert urls == [CREATOR_INFO_URL, INBOX_INIT_URL]
+        assert VIDEO_INIT_URL not in urls
+        payload = mock_request.call_args_list[1].kwargs["json"]
+        assert "post_info" not in payload
+        assert payload["source_info"] == {
+            "source": "PULL_FROM_URL",
+            "video_url": "https://cdn.example.com/video.mp4",
+        }
+        assert result.platform_post_id == "v_inbox_url~123"
+
+    @patch.object(TikTokProvider, "_request")
+    def test_inbox_mode_publishes_on_unaudited_public_account(self, mock_request):
+        # The whole point: creator_info offering only SELF_ONLY blocks a direct
+        # post (see TestPublishPost) but must not block a draft upload.
+        mock_request.side_effect = [
+            _creator_info_response(["SELF_ONLY"]),
+            _make_response({"data": {"publish_id": "v_inbox_url~123"}}),
+        ]
+
+        provider = TikTokProvider({"client_key": "k", "client_secret": "s"})
+        result = provider.publish_post("tok", _video_content(post_mode="INBOX", privacy_level="PUBLIC_TO_EVERYONE"))
+
+        assert result.platform_post_id == "v_inbox_url~123"
+
+    @patch.object(TikTokProvider, "_request")
+    def test_inbox_result_is_marked_so_the_row_is_not_called_published(self, mock_request):
+        mock_request.side_effect = [
+            _creator_info_response(["PUBLIC_TO_EVERYONE"]),
+            _make_response({"data": {"publish_id": "v_inbox_url~123"}}),
+        ]
+
+        provider = TikTokProvider({"client_key": "k", "client_secret": "s"})
+        result = provider.publish_post("tok", _video_content(post_mode="INBOX"))
+
+        assert result.extra["post_mode"] == "INBOX"
+
+    @patch.object(TikTokProvider, "_request")
+    def test_direct_post_stays_the_default(self, mock_request):
+        mock_request.side_effect = [
+            _creator_info_response(["PUBLIC_TO_EVERYONE"]),
+            _init_response(),
+        ]
+
+        provider = TikTokProvider({"client_key": "k", "client_secret": "s"})
+        provider.publish_post("tok", _video_content())
+
+        urls = [call.args[1] for call in mock_request.call_args_list]
+        assert urls == [CREATOR_INFO_URL, VIDEO_INIT_URL]
+
+    @patch.object(TikTokProvider, "_request")
+    def test_unknown_post_mode_rejected_without_requests(self, mock_request):
+        provider = TikTokProvider({"client_key": "k", "client_secret": "s"})
+        with pytest.raises(PublishError) as excinfo:
+            provider.publish_post("tok", _video_content(post_mode="whatever"))
+
+        assert excinfo.value.retryable is False
+        mock_request.assert_not_called()
+
+    @patch.object(TikTokProvider, "_request")
+    def test_duration_guard_still_applies_in_inbox_mode(self, mock_request):
+        # Dropping post_info does not drop TikTok's max-duration rule: the init
+        # call would be refused, so it is caught before the upload.
+        mock_request.return_value = _creator_info_response(["PUBLIC_TO_EVERYONE"])
+
+        provider = TikTokProvider({"client_key": "k", "client_secret": "s"})
+        content = _video_content(post_mode="INBOX")
+        content.video_duration_sec = 900.0
+        with pytest.raises(PublishError) as excinfo:
+            provider.publish_post("tok", content)
+
+        assert excinfo.value.retryable is False
+        urls = [call.args[1] for call in mock_request.call_args_list]
+        assert INBOX_INIT_URL not in urls
+
+    @patch.object(TikTokProvider, "_request")
+    def test_creator_info_failure_does_not_block_inbox_upload(self, mock_request):
+        mock_request.side_effect = [
+            APIError("creator_info down", status_code=500),
+            _make_response({"data": {"publish_id": "v_inbox_url~123"}}),
+        ]
+
+        provider = TikTokProvider({"client_key": "k", "client_secret": "s"})
+        result = provider.publish_post("tok", _video_content(post_mode="INBOX"))
+
+        assert result.platform_post_id == "v_inbox_url~123"
+
+
+class TestInboxPublishState:
+    """What the reconciliation task reads to settle an ``awaiting_creator`` row."""
+
+    @patch.object(TikTokProvider, "_request")
+    def test_publish_complete_is_published(self, mock_request):
+        mock_request.return_value = _make_response({"data": {"status": "PUBLISH_COMPLETE"}})
+        provider = TikTokProvider({"client_key": "k", "client_secret": "s"})
+        assert provider.inbox_publish_state("tok", "v_inbox_url~123") == "published"
+        assert mock_request.call_args.args[1] == STATUS_FETCH_URL
+
+    @patch.object(TikTokProvider, "_request")
+    def test_send_to_user_inbox_is_still_waiting(self, mock_request):
+        mock_request.return_value = _make_response({"data": {"status": "SEND_TO_USER_INBOX"}})
+        provider = TikTokProvider({"client_key": "k", "client_secret": "s"})
+        assert provider.inbox_publish_state("tok", "v_inbox_url~123") == "waiting"
+
+    @patch.object(TikTokProvider, "_request")
+    def test_failed_and_expired_are_failed(self, mock_request):
+        provider = TikTokProvider({"client_key": "k", "client_secret": "s"})
+        for status in ("FAILED", "EXPIRED"):
+            mock_request.return_value = _make_response({"data": {"status": status}})
+            assert provider.inbox_publish_state("tok", "v_inbox_url~123") == "failed"
+
+    @patch.object(TikTokProvider, "_request")
+    def test_unreachable_status_endpoint_never_reports_failed(self, mock_request):
+        # A transient outage must not bury a video that is sitting fine in
+        # someone's drafts.
+        mock_request.side_effect = APIError("status endpoint down", status_code=503)
+        provider = TikTokProvider({"client_key": "k", "client_secret": "s"})
+        assert provider.inbox_publish_state("tok", "v_inbox_url~123") == "waiting"
+
+
+class TestSilentVideoGate:
+    """[Willy 26/09/2026] A video with no audio track is refused before any upload."""
+
+    def _content(self, **extra):
+        return PublishContent(
+            text="x", media_files=["/tmp/v.mp4"], post_type=PostType.VIDEO, extra={"post_mode": "INBOX", **extra}
+        )
+
+    def test_silent_video_is_refused_and_not_retried(self):
+        provider = TikTokProvider({"client_key": "k", "client_secret": "s"})
+        with (
+            patch("providers.tiktok.has_audio_stream", return_value=False),
+            patch.object(TikTokProvider, "_publish_inbox") as inbox,
+            pytest.raises(PublishError) as err,
+        ):
+            provider.publish_post("tok", self._content())
+        assert "SILENT_VIDEO" in str(err.value)
+        assert err.value.retryable is False
+        inbox.assert_not_called()
+
+    def test_video_with_sound_goes_through(self):
+        provider = TikTokProvider({"client_key": "k", "client_secret": "s"})
+        with (
+            patch("providers.tiktok.has_audio_stream", return_value=True),
+            patch.object(TikTokProvider, "_publish_inbox", return_value="ok") as inbox,
+        ):
+            assert provider.publish_post("tok", self._content()) == "ok"
+        inbox.assert_called_once()
+
+    def test_unknown_audio_and_escape_hatch_do_not_block(self):
+        provider = TikTokProvider({"client_key": "k", "client_secret": "s"})
+        with (
+            patch("providers.tiktok.has_audio_stream", return_value=None),
+            patch.object(TikTokProvider, "_publish_inbox", return_value="ok"),
+        ):
+            assert provider.publish_post("tok", self._content()) == "ok"
+        with (
+            patch("providers.tiktok.has_audio_stream", return_value=False),
+            patch.object(TikTokProvider, "_publish_inbox", return_value="ok"),
+        ):
+            assert provider.publish_post("tok", self._content(allow_silent=True)) == "ok"

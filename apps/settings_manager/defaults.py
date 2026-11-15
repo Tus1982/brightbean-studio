@@ -25,6 +25,13 @@ APP_DEFAULTS = {
     "approval.max_reminders_per_post": 2,
     "approval.stalled_post_escalation": True,
     "approval.email_subject_template": "{workspace_name} - Posts ready for your review",
+    # How TikTok posts leave BrightBean: "DIRECT_POST" straight onto the
+    # profile (needs TikTok's Content Posting audit) or "INBOX" into the
+    # creator's TikTok drafts (no audit, but a person finishes the post inside
+    # the TikTok app). Fork default is INBOX because this deployment cannot be
+    # audited: TikTok's Content Sharing Guidelines exclude "a utility tool to
+    # help upload contents to the account(s) you or your team manages".
+    "publishing.tiktok_post_mode": "INBOX",
     "publishing.first_comment_delay_seconds": 120,
     "publishing.retry_max_attempts": 3,
     "publishing.retry_backoff_schedule": "1min,5min,30min",
