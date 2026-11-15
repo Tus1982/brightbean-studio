@@ -329,6 +329,17 @@ PATCH_FIELDS = (
 )
 
 
+class DraftOperationRequest(Schema):
+    """Willy editorial operations: no schedule or publish fields."""
+
+    operation: str
+    richiesto_da: str = Field(..., min_length=1, max_length=120)
+    motivo: str = Field("", max_length=1000)
+    column: str | None = None
+    changes: UpdatePostRequest | None = None
+    dry_run: bool = False
+
+
 class ScheduleRequest(Schema):
     scheduled_at: dt.datetime = Field(..., description="UTC timestamp at which the publisher should fire the post.")
 

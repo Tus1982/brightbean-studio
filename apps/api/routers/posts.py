@@ -35,6 +35,7 @@ from apps.api.middleware import (
 )
 from apps.api.schemas import (
     CreatePostRequest,
+    DraftOperationRequest,
     PostResponse,
     ScheduleRequest,
     UpdatePostRequest,
@@ -50,6 +51,137 @@ from apps.composer.services import (
 from apps.social_accounts.models import SocialAccount
 
 router = Router(tags=["posts"])
+
+# Editorial position, independent from the publisher lifecycle. Kept in the
+# existing private notes; no duplicate content store and no status escalation.
+WILLY_EDITORIAL = "[WILLY_EDITORIAL] "
+
+
+def _editorial_notes(notes, state, actor, reason):
+    import json
+
+    from django.utils import timezone
+
+    lines = [line for line in (notes or "").splitlines() if not line.startswith(WILLY_EDITORIAL)]
+    lines.append(
+        WILLY_EDITORIAL
+        + json.dumps(
+            {
+                "column": state,
+                "richiesto_da": actor,
+                "quando": timezone.now().isoformat(),
+                "motivo": reason,
+                "human_approval_required": True,
+            },
+            ensure_ascii=False,
+        )
+    )
+    result = "\n".join(lines)
+    if len(result) > 10000:
+        raise HttpError(422, "Internal notes plus audit marker exceed 10000 characters.")
+    return result
+
+
+@router.post("/{post_id}/draft-operation", summary="Draft-only editorial operation")
+def draft_operation(request, post_id: uuid.UUID, payload: DraftOperationRequest):
+    """Lock all rows before checking status. Never schedules or dispatches work."""
+    import json
+
+    from django.db import transaction
+    from django.utils import timezone
+
+    from apps.api_keys.models import ApiKeyAuditLog
+    from apps.publisher.models import PublishLog
+
+    enforce_http_rate_limits(request, is_write=not payload.dry_run)
+    _require_perm(request, "create_posts")
+    if payload.operation not in {"archive", "delete", "move", "edit"}:
+        raise HttpError(422, "Unknown draft operation.")
+    if payload.dry_run and payload.operation not in {"archive", "delete"}:
+        raise HttpError(422, "dry_run is supported for archive and delete.")
+    if payload.operation in {"archive", "delete"} and not payload.motivo.strip():
+        raise HttpError(422, "motivo is required.")
+    columns = {"IDEAS", "IN_PRODUCTION", "TO_APPROVE", "ANALYSIS"}
+    if payload.operation == "move" and payload.column not in columns:
+        raise HttpError(422, "Only IDEAS / IN_PRODUCTION / TO_APPROVE / ANALYSIS are allowed.")
+    changes = payload.changes.model_dump(exclude_none=True, exclude_unset=True) if payload.changes else {}
+    if set(changes) - {"title", "caption", "internal_notes", "proposed_publish_at", "social_account_ids"}:
+        raise HttpError(422, "Only draft text, proposed date and destinations may be edited.")
+    if payload.operation != "edit" and changes:
+        raise HttpError(422, "changes are only accepted for edit.")
+    if payload.operation == "edit" and not changes:
+        raise HttpError(422, "No changes requested.")
+    if not payload.richiesto_da.strip():
+        raise HttpError(422, "richiesto_da is required.")
+    with transaction.atomic():
+        post = _get_workspace_post(request, post_id)
+        post = Post.objects.select_for_update().get(pk=post.pk)
+        children = list(PlatformPost.objects.select_for_update().filter(post=post))
+        # Recheck workspace and every allowlisted child after taking locks.
+        _get_workspace_post(request, post_id)
+        if (
+            post.published_at
+            or not children
+            or any(
+                pp.status not in {"draft", "changes_requested", "rejected"}
+                or pp.published_at
+                or pp.scheduled_at
+                or pp.platform_post_id
+                for pp in children
+            )
+            or post.scheduled_at
+        ):
+            raise HttpError(409, "Only never-published, unscheduled drafts may be changed.")
+        # Even a reset-to-draft row with a previous publishing attempt is not a test draft.
+        if PublishLog.objects.filter(platform_post__in=children).exists():
+            raise HttpError(409, "A publishing attempt exists: operation refused.")
+        current = "IN_PRODUCTION"
+        for line in post.internal_notes.splitlines():
+            if line.startswith(WILLY_EDITORIAL):
+                try:
+                    current = json.loads(line[len(WILLY_EDITORIAL) :])["column"]
+                except (ValueError, KeyError, TypeError):
+                    raise HttpError(409, "Invalid editorial marker: review the draft first.") from None
+        column = {"archive": "ARCHIVE", "delete": "DELETED", "move": payload.column}.get(payload.operation, current)
+        now = timezone.now().isoformat()
+        result = {
+            "id": str(post_id),
+            "esito": "ok",
+            "kanban": column,
+            "dry_run": payload.dry_run,
+            "richiesto_da": payload.richiesto_da,
+            "quando": now,
+        }
+        if payload.dry_run:
+            return result
+        if payload.operation == "delete":
+            post.delete()
+        else:
+            notes = changes.get("internal_notes", post.internal_notes)
+            changes["internal_notes"] = _editorial_notes(notes, column, payload.richiesto_da, payload.motivo)
+            if payload.operation == "edit":
+                # Existing validation for media, workspace, destinations and overrides.
+                update(request, post_id, UpdatePostRequest(**changes, apply_text_to_platforms=True))
+            else:
+                post.internal_notes = changes["internal_notes"]
+                post.save(update_fields=["internal_notes", "updated_at"])
+        # Durable audit in the SAME transaction: failure rolls the operation back.
+        key = request.api_key
+        oauth = getattr(key, "is_oauth", False)
+        ApiKeyAuditLog.objects.create(
+            api_key=None if oauth else key,
+            actor_user=key.issued_by if oauth else None,
+            actor_label="willy-mcp",
+            action="post.draft." + payload.operation,
+            target_id=post_id,
+            method=request.method,
+            path=request.path[:255],
+            status_code=200,
+            user_agent=json.dumps(
+                {"richiesto_da": payload.richiesto_da, "quando": now, "motivo": payload.motivo}, ensure_ascii=False
+            )[:512],
+        )
+        return result
 
 
 # ---------------------------------------------------------------------------
