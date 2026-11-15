@@ -94,6 +94,11 @@ FACEBOOK_REEL_MAX_DURATION_SEC = 90
 # Facebook caps the ``attached_media`` array on a single feed post. Larger sets
 # must use the album-creation flow, which this provider does not implement.
 FACEBOOK_MAX_ATTACHED_MEDIA = 10
+# Stories and Reels do not go through the Graph edges the feed uses. Video for
+# both is handed over by a resumable upload host, which takes the file by URL in
+# a header rather than in a JSON body — the one Meta endpoint in this provider
+# that is not ``graph.facebook.com``.
+RUPLOAD_URL = "https://rupload.facebook.com/video-upload/v25.0"
 
 
 class FacebookProvider(SocialProvider):
@@ -131,7 +136,14 @@ class FacebookProvider(SocialProvider):
 
     @property
     def supported_post_types(self) -> list[PostType]:
-        return [PostType.TEXT, PostType.IMAGE, PostType.VIDEO, PostType.REEL, PostType.LINK]
+        return [
+            PostType.TEXT,
+            PostType.IMAGE,
+            PostType.VIDEO,
+            PostType.LINK,
+            PostType.STORY,
+            PostType.REEL,
+        ]
 
     @property
     def supported_media_types(self) -> list[MediaType]:
@@ -310,13 +322,105 @@ class FacebookProvider(SocialProvider):
                 retryable=False,
             )
 
-        if content.post_type == PostType.IMAGE and content.media_urls:
-            return self._publish_photo(access_token, page_id, content)
+        # Stories and Reels are asked for explicitly (``post_type`` hint); they
+        # are never inferred from the media, because the same 1080x1920 image
+        # is a perfectly good feed post and guessing would silently move
+        # somebody's post into a surface that disappears in 24 hours.
+        if content.post_type == PostType.STORY:
+            return self._publish_story(access_token, page_id, content)
         if content.post_type == PostType.REEL:
             return self._publish_reel(access_token, page_id, content)
+        if content.post_type == PostType.IMAGE and content.media_urls:
+            return self._publish_photo(access_token, page_id, content)
         if content.post_type == PostType.VIDEO and content.media_urls:
             return self._publish_video(access_token, page_id, content)
         return self._publish_text_or_link(access_token, page_id, content)
+
+    # ------------------------------------------------------------------
+    # Stories [fork Willy]
+    #
+    # Not through ``/feed``. A photo story is a two-step move: stage the photo
+    # unpublished, then hand its id to ``/photo_stories``. A video story is a
+    # three-step resumable upload: start, hand the file over to the upload
+    # host, finish. Reels use upstream's ``_publish_reel`` (same protocol, with
+    # duration and per-phase checks).
+    # ------------------------------------------------------------------
+
+    def _publish_story(self, access_token: str, page_id: str, content: PublishContent) -> PublishResult:
+        if not content.media_urls:
+            raise PublishError(
+                "A Facebook story needs one image or video; a text-only story does not exist",
+                platform=self.platform_name,
+            )
+        url = content.media_urls[0]
+        if len(content.media_urls) > 1:
+            # Not an error worth failing on: Meta publishes one media per story
+            # card, and the caller's first item is the one they meant.
+            logger.info("Facebook story: %d media given, publishing the first only", len(content.media_urls))
+        if content.is_video(0):
+            video_id = self._upload_video_resumable(access_token, page_id, url, edge="video_stories")
+            data = self._request(
+                "POST",
+                f"{BASE_URL}/{page_id}/video_stories",
+                access_token=access_token,
+                params={"upload_phase": "finish", "video_id": video_id},
+            ).json()
+            story_id = data.get("post_id") or data.get("id") or video_id
+        else:
+            staged = self._request(
+                "POST",
+                f"{BASE_URL}/{page_id}/photos",
+                access_token=access_token,
+                json={"url": url, "published": False},
+            ).json()
+            photo_id = staged["id"]
+            data = self._request(
+                "POST",
+                f"{BASE_URL}/{page_id}/photo_stories",
+                access_token=access_token,
+                json={"photo_id": photo_id},
+            ).json()
+            story_id = data.get("post_id") or data.get("id") or photo_id
+        # ⚠ The caption does not travel: a Page story carries no message field.
+        # Whoever wrote it has to know, so it is said out loud rather than
+        # dropped in silence.
+        if content.text:
+            logger.info("Facebook story %s published without the caption: stories carry no text field", story_id)
+        return PublishResult(
+            platform_post_id=self._stored_post_id(str(story_id)),
+            url=f"https://www.facebook.com/stories/{story_id}",
+            extra={**data, "post_type": "story"},
+        )
+
+    def _upload_video_resumable(self, access_token: str, page_id: str, url: str, *, edge: str) -> str:
+        """Start the upload and hand the hosted file to Meta. Returns the video id.
+
+        The file never passes through us: `file_url` tells the upload host to
+        fetch it itself. That is the whole reason media lives on a public URL.
+        """
+        started = self._request(
+            "POST",
+            f"{BASE_URL}/{page_id}/{edge}",
+            access_token=access_token,
+            params={"upload_phase": "start"},
+        ).json()
+        video_id = started.get("video_id") or started.get("id")
+        if not video_id:
+            raise PublishError(
+                f"Facebook did not return a video id when starting the {edge} upload",
+                platform=self.platform_name,
+            )
+        upload_url = started.get("upload_url") or f"{RUPLOAD_URL}/{video_id}"
+        # The upload host wants the token as `OAuth <token>`, not `Bearer`, and
+        # takes the file as a header. `_request` would add a Bearer header from
+        # `access_token`, so the header goes in explicitly and that argument
+        # stays unused here.
+        self._request(
+            "POST",
+            upload_url,
+            headers={"Authorization": f"OAuth {access_token}", "file_url": url, "offset": "0"},
+        )
+        return str(video_id)
 
     def _publish_text_or_link(self, access_token: str, page_id: str, content: PublishContent) -> PublishResult:
         payload: dict = {"message": content.text}

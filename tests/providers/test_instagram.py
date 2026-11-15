@@ -8,7 +8,11 @@ from providers.exceptions import APIError, PublishError
 from providers.instagram import InstagramProvider
 from providers.instagram_login import InstagramLoginProvider
 from providers.meta_comments import INSTAGRAM_COMMENT_FIELD_SETS
+from providers.meta_insights import fetch_insights_safe as fetch_insights_safe_originale
 from providers.types import PostType, PublishContent
+
+# [fork Willy]
+PRESIGNED_MP4 = "https://r2.example.com/media/reel.mp4?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=abc"
 
 
 def _resp(data):
@@ -1266,3 +1270,161 @@ def test_video_is_a_declared_post_type(provider_cls):
     """An explicit post_type hint can still hand the provider VIDEO, so the
     declared contract has to admit it."""
     assert PostType.VIDEO in provider_cls(IG_CREDS).supported_post_types
+
+
+def test_story_does_not_send_a_caption():
+    """Il contenitore Storia di Instagram non ha un campo testo: la didascalia si
+    lascia fuori (e si dichiara), invece di mandarla e farsela rifiutare. [07/09/2026]"""
+    from unittest.mock import MagicMock
+
+    from providers.instagram import InstagramProvider
+    from providers.types import PostType, PublishContent
+
+    provider = InstagramProvider({"client_id": "id", "client_secret": "secret"})
+    provider._create_container = MagicMock(return_value="container-1")
+    provider._wait_for_container = MagicMock(return_value=None)
+    provider._publish_container = MagicMock(return_value="pubblicato")
+
+    provider.publish_post(
+        "token",
+        PublishContent(
+            text="questa non deve viaggiare",
+            media_urls=["https://cdn.example.com/story.png"],
+            post_type=PostType.STORY,
+            extra={"ig_user_id": "ig-1"},
+        ),
+    )
+
+    payload = provider._create_container.call_args.args[2]
+    assert payload["media_type"] == "STORIES"
+    assert payload["image_url"] == "https://cdn.example.com/story.png"
+    assert "caption" not in payload
+
+
+def test_a_story_from_a_presigned_video_is_sent_as_a_video():
+    """Un Reel ripubblicato come Storia usciva come foto della copertina: l'URL firmato di R2
+    finisce con la firma, non con .mp4, e il video partiva come image_url. [18/09/2026]"""
+    from unittest.mock import MagicMock
+
+    from providers.instagram import InstagramProvider
+    from providers.types import PostType, PublishContent
+
+    provider = InstagramProvider({"client_id": "id", "client_secret": "secret"})
+    provider._create_container = MagicMock(return_value="container-1")
+    provider._wait_for_container = MagicMock(return_value=None)
+    provider._publish_container = MagicMock(return_value="pubblicato")
+
+    provider.publish_post(
+        "token",
+        PublishContent(media_urls=[PRESIGNED_MP4], post_type=PostType.STORY, extra={"ig_user_id": "ig-1"}),
+    )
+
+    payload = provider._create_container.call_args.args[2]
+    assert payload["media_type"] == "STORIES"
+    assert payload["video_url"] == PRESIGNED_MP4
+    assert "image_url" not in payload
+
+
+def test_a_carousel_video_behind_a_presigned_url_is_a_video():
+    from unittest.mock import MagicMock
+
+    from providers.instagram import InstagramProvider
+    from providers.types import PostType, PublishContent
+
+    provider = InstagramProvider({"client_id": "id", "client_secret": "secret"})
+    provider._create_container = MagicMock(side_effect=["c1", "c2", "album"])
+    provider._wait_for_container = MagicMock(return_value=None)
+    provider._publish_container = MagicMock(return_value="pubblicato")
+
+    provider.publish_post(
+        "token",
+        PublishContent(
+            media_urls=["https://r2.example.com/a.png?X-Amz-Signature=x", PRESIGNED_MP4],
+            post_type=PostType.CAROUSEL,
+            extra={"ig_user_id": "ig-1"},
+        ),
+    )
+
+    primo = provider._create_container.call_args_list[0].args[2]
+    secondo = provider._create_container.call_args_list[1].args[2]
+    assert "image_url" in primo and "video_url" not in primo
+    assert secondo["media_type"] == "VIDEO" and secondo["video_url"] == PRESIGNED_MP4
+
+
+def test_feed_post_still_sends_the_caption():
+    from unittest.mock import MagicMock
+
+    from providers.instagram import InstagramProvider
+    from providers.types import PostType, PublishContent
+
+    provider = InstagramProvider({"client_id": "id", "client_secret": "secret"})
+    provider._create_container = MagicMock(return_value="container-1")
+    provider._wait_for_container = MagicMock(return_value=None)
+    provider._publish_container = MagicMock(return_value="pubblicato")
+
+    provider.publish_post(
+        "token",
+        PublishContent(
+            text="questa invece si",
+            media_urls=["https://cdn.example.com/post.png"],
+            post_type=PostType.IMAGE,
+            extra={"ig_user_id": "ig-1"},
+        ),
+    )
+
+    payload = provider._create_container.call_args.args[2]
+    assert payload["caption"] == "questa invece si"
+
+
+def test_a_story_is_measured_with_the_story_metrics():
+    """[07/09/2026] Asking a story for the feed metrics gets nothing back: likes,
+    saved and shares are not supported there. A story has reach, views, replies and
+    navigation — and those numbers die with it, 24 hours later."""
+    from unittest.mock import MagicMock
+
+    from providers import instagram as ig
+
+    provider = ig.InstagramProvider({"client_id": "id", "client_secret": "secret"})
+    provider._get_media_fields = MagicMock(return_value={"media_product_type": "STORY"})
+    visti = {}
+
+    def _finto(_req, *, platform, endpoint, access_token, metrics, endpoint_type, **_kw):
+        visti["metriche"] = list(metrics)
+        return {"reach": 120, "views": 140, "replies": 3, "navigation": 90}, []
+
+    ig.fetch_insights_safe = _finto
+    try:
+        m = provider.get_post_metrics("token", "media-1")
+    finally:
+        ig.fetch_insights_safe = fetch_insights_safe_originale
+
+    assert visti["metriche"] == ["reach", "views", "replies", "navigation"]
+    assert m.reach == 120 and m.video_views == 140
+    # niente cuori e niente salvataggi su una Storia: zero qui vuol dire «non esiste»,
+    # e infatti i suoi numeri veri viaggiano accanto, col nome che gli da' Meta
+    assert m.likes == 0 and m.saves == 0
+    assert m.extra["replies"] == 3 and m.extra["navigation"] == 90
+    assert m.extra["surface"] == "story"
+
+
+def test_a_feed_post_keeps_the_feed_metrics():
+    from unittest.mock import MagicMock
+
+    from providers import instagram as ig
+
+    provider = ig.InstagramProvider({"client_id": "id", "client_secret": "secret"})
+    provider._get_media_fields = MagicMock(return_value={"media_product_type": "FEED", "like_count": 9})
+    visti = {}
+
+    def _finto(_req, *, platform, endpoint, access_token, metrics, endpoint_type, **_kw):
+        visti["metriche"] = list(metrics)
+        return {"reach": 50, "likes": 9, "saved": 2}, []
+
+    ig.fetch_insights_safe = _finto
+    try:
+        m = provider.get_post_metrics("token", "media-2")
+    finally:
+        ig.fetch_insights_safe = fetch_insights_safe_originale
+
+    assert "saved" in visti["metriche"] and "navigation" not in visti["metriche"]
+    assert m.likes == 9 and m.saves == 2

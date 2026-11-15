@@ -43,6 +43,70 @@ VALID_PRIVACY_LEVELS = frozenset(
     }
 )
 
+# How the video reaches TikTok.
+#
+# ``DIRECT_POST`` calls /v2/post/publish/video/init/ and puts the video straight
+# on the profile. It needs TikTok's Content Posting API audit; an unaudited
+# client is refused with ``unaudited_client_can_only_post_to_private_accounts``,
+# which is about the ACCOUNT being private, not the post.
+#
+# ``INBOX`` calls /v2/post/publish/inbox/video/init/ and drops the video into
+# the creator's TikTok drafts, where they finish and publish it by hand. It
+# needs no audit and works on a public account, which is the only route open to
+# a self-hosted deployment TikTok will not audit. The trade: that endpoint takes
+# no ``post_info``, so caption, privacy and interaction settings are asked of the
+# creator inside the TikTok app and anything typed here does not travel.
+# [Willy 26/09/2026] A TikTok video without an audio track never leaves: TikTok is
+# watched with sound on, and a silent draft reached the creator and got published as
+# is. The error carries a fixed marker so the Willy side can pick the post up, add a
+# voice-over and ask for approval before trying again. ``allow_silent`` in the post's
+# platform_extra is the explicit escape hatch.
+SILENT_VIDEO_MARKER = "SILENT_VIDEO"
+SILENT_VIDEO_MESSAGE = (
+    f"{SILENT_VIDEO_MARKER}: the video has no audio track. TikTok videos need sound "
+    "(voice or music) before they are sent."
+)
+
+
+def has_audio_stream(source: str) -> bool | None:
+    """True/False from ffprobe; None when it cannot tell (no ffprobe, unreadable file).
+
+    None never blocks a publish: the check guards against silent videos, it must not
+    become a new way for a good video to fail.
+    """
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "a",
+                "-show_entries",
+                "stream=codec_type",
+                "-of",
+                "csv=p=0",
+                str(source),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except Exception:
+        logger.warning("[TIKTOK] ffprobe unavailable: audio check skipped", exc_info=True)
+        return None
+    if result.returncode != 0:
+        logger.warning("[TIKTOK] ffprobe could not read %s: audio check skipped", source)
+        return None
+    return bool(result.stdout.strip())
+
+
+POST_MODE_DIRECT = "DIRECT_POST"
+POST_MODE_INBOX = "INBOX"
+VALID_POST_MODES = frozenset({POST_MODE_DIRECT, POST_MODE_INBOX})
+
 # Error codes from /v2/post/publish/video/init/ that no amount of retrying
 # can fix (app audit status, bad params, missing scopes). The engine fails
 # these immediately instead of burning the backoff schedule.
@@ -304,6 +368,22 @@ class TikTokProvider(SocialProvider):
                 retryable=False,
             )
 
+        self._check_audio(content)
+
+        post_mode = str(content.extra.get("post_mode") or POST_MODE_DIRECT).upper()
+        if post_mode not in VALID_POST_MODES:
+            raise PublishError(
+                f"Invalid post_mode '{post_mode}'. Must be one of {sorted(VALID_POST_MODES)}",
+                platform=self.platform_name,
+                retryable=False,
+            )
+        if post_mode == POST_MODE_INBOX:
+            # No post_info on that endpoint, so there is no privacy level to
+            # reconcile: TikTok asks the creator for it inside the app. The
+            # duration guard still applies - an over-long video is refused at
+            # init either way.
+            return self._publish_inbox(access_token, content)
+
         privacy_level_is_explicit = "privacy_level" in content.extra
         privacy_level = content.extra.get("privacy_level", DEFAULT_PRIVACY_LEVEL)
         if privacy_level not in VALID_PRIVACY_LEVELS:
@@ -370,9 +450,16 @@ class TikTokProvider(SocialProvider):
                     retryable=False,
                 )
 
-        # TikTok's UX guidelines require checking the video against the
-        # creator's max post duration before uploading. Skip silently when
-        # either value is unknown (0/None) so we never block on missing data.
+        self._check_video_duration(info, content)
+        return privacy_level
+
+    def _check_video_duration(self, info: dict, content: PublishContent) -> None:
+        """Refuse a video longer than the creator's max post duration.
+
+        TikTok's UX guidelines require the check before uploading, and it holds
+        for both post modes. Skips silently when either value is unknown
+        (0/None) so a missing creator_info never blocks a publish.
+        """
         max_duration = info.get("max_video_post_duration_sec")
         duration = content.video_duration_sec
         if max_duration and duration and duration > max_duration:
@@ -383,18 +470,21 @@ class TikTokProvider(SocialProvider):
                 raw_response=info,
                 retryable=False,
             )
-        return privacy_level
 
-    def _init_video_publish(self, access_token: str, payload: dict) -> dict:
-        """POST to /post/publish/video/init/ and return the parsed body.
+    def _init_video_publish(self, access_token: str, payload: dict, *, inbox: bool = False) -> dict:
+        """POST to a publish-init endpoint and return the parsed body.
+
+        ``inbox=False`` targets /post/publish/video/init/ (direct post);
+        ``inbox=True`` targets /post/publish/inbox/video/init/ (drafts).
 
         Permanent TikTok error codes are re-raised as non-retryable
         PublishErrors via :meth:`_raise_classified_publish_error`.
         """
+        path = "post/publish/inbox/video/init/" if inbox else "post/publish/video/init/"
         try:
             resp = self._request(
                 "POST",
-                f"{API_BASE}/post/publish/video/init/",
+                f"{API_BASE}/{path}",
                 access_token=access_token,
                 json=payload,
             )
@@ -455,14 +545,12 @@ class TikTokProvider(SocialProvider):
             extra=body.get("data", {}),
         )
 
-    def _publish_file_upload(
-        self,
-        access_token: str,
-        content: PublishContent,
-        privacy_level: str,
-    ) -> PublishResult:
-        """Publish using FILE_UPLOAD source (two-step)."""
-        video_path = content.media_files[0]
+    def _file_upload_source_info(self, video_path: str) -> tuple[dict, str]:
+        """``source_info`` for a single-chunk FILE_UPLOAD, plus its content type.
+
+        Shared by direct post and inbox: TikTok takes the identical block on
+        both endpoints.
+        """
         video_size = os.path.getsize(video_path)
         if video_size > MAX_SINGLE_CHUNK_SIZE:
             # Not retryable: the file will be exactly this big on every attempt,
@@ -476,21 +564,29 @@ class TikTokProvider(SocialProvider):
                 platform=self.platform_name,
                 retryable=False,
             )
-
         ext = os.path.splitext(video_path)[1].lower()
         content_type = CONTENT_TYPE_BY_EXT.get(ext, "video/mp4")
-
-        # Step 1: initialize upload with size metadata TikTok requires
-        payload = {
-            "post_info": self._build_post_info(content, privacy_level),
-            "source_info": {
+        return (
+            {
                 "source": "FILE_UPLOAD",
                 "video_size": video_size,
                 "chunk_size": video_size,
                 "total_chunk_count": 1,
             },
-        }
-        init_body = self._init_video_publish(access_token, payload)
+            content_type,
+        )
+
+    def _transfer_video_file(
+        self,
+        video_path: str,
+        init_body: dict,
+        content_type: str,
+        video_size: int,
+    ) -> str:
+        """Stream the video to the presigned URL from an init response.
+
+        Returns the ``publish_id`` TikTok handed back.
+        """
         upload_url = init_body.get("data", {}).get("upload_url")
         publish_id = init_body.get("data", {}).get("publish_id", "")
 
@@ -517,6 +613,82 @@ class TikTokProvider(SocialProvider):
                 data=video,
                 timeout=120.0,
             )
+        return publish_id
+
+    def _check_audio(self, content: PublishContent) -> None:
+        if content.extra.get("allow_silent"):
+            return
+        sources = content.media_files or content.media_urls
+        source = sources[0] if sources else None
+        if source and has_audio_stream(source) is False:
+            raise PublishError(SILENT_VIDEO_MESSAGE, platform=self.platform_name, retryable=False)
+
+    def _publish_inbox(self, access_token: str, content: PublishContent) -> PublishResult:
+        """Send the video to the creator's TikTok drafts (no audit required).
+
+        The inbox endpoint accepts ``source_info`` only. Caption, privacy level
+        and interaction settings are not sent: TikTok asks the creator for them
+        when they open the draft, so nothing typed in the composer reaches
+        TikTok in this mode.
+
+        TikTok allows at most 5 unfinished inbox shares per user per 24 hours;
+        beyond that the init call is refused.
+        """
+        try:
+            info = self.query_creator_info(access_token)
+        except Exception:
+            logger.warning("TikTok creator_info query failed; proceeding with inbox upload", exc_info=True)
+            info = {}
+        self._check_video_duration(info, content)
+
+        if content.media_files:
+            video_path = content.media_files[0]
+            source_info, content_type = self._file_upload_source_info(video_path)
+            init_body = self._init_video_publish(access_token, {"source_info": source_info}, inbox=True)
+            publish_id = self._transfer_video_file(video_path, init_body, content_type, source_info["video_size"])
+        elif content.media_urls:
+            init_body = self._init_video_publish(
+                access_token,
+                {"source_info": {"source": "PULL_FROM_URL", "video_url": content.media_urls[0]}},
+                inbox=True,
+            )
+            publish_id = init_body.get("data", {}).get("publish_id", "")
+        else:
+            raise PublishError(
+                "No video source provided (media_files or media_urls required)",
+                platform=self.platform_name,
+                retryable=False,
+            )
+
+        logger.info(
+            "[TIKTOK] sent to creator inbox: publish_id=%s (caption not transmitted; "
+            "the creator writes it in the TikTok app)",
+            publish_id,
+        )
+        data = dict(init_body.get("data", {}))
+        # Marks the row for the UI: the video sits in TikTok's drafts, not live.
+        data["post_mode"] = POST_MODE_INBOX
+        return PublishResult(platform_post_id=publish_id, extra=data)
+
+    def _publish_file_upload(
+        self,
+        access_token: str,
+        content: PublishContent,
+        privacy_level: str,
+    ) -> PublishResult:
+        """Publish using FILE_UPLOAD source (two-step)."""
+        video_path = content.media_files[0]
+        source_info, content_type = self._file_upload_source_info(video_path)
+
+        # Step 1: initialize upload with size metadata TikTok requires
+        payload = {
+            "post_info": self._build_post_info(content, privacy_level),
+            "source_info": source_info,
+        }
+        init_body = self._init_video_publish(access_token, payload)
+
+        # Step 2: stream the video binary to TikTok's presigned URL
+        publish_id = self._transfer_video_file(video_path, init_body, content_type, source_info["video_size"])
 
         return PublishResult(
             platform_post_id=publish_id,
@@ -569,6 +741,39 @@ class TikTokProvider(SocialProvider):
             json={"publish_id": publish_id},
         )
         return resp.json().get("data", {}) or {}
+
+    def inbox_publish_state(self, access_token: str, publish_id: str) -> str:
+        """Where an inbox upload has got to: ``published``, ``failed`` or ``waiting``.
+
+        Reads ``/v2/post/publish/status/fetch/``, the only source that knows
+        whether the creator finished the draft. A status the endpoint cannot be
+        reached for is reported as ``waiting`` — never as failed, or a transient
+        outage would bury a video that is sitting fine in someone's drafts.
+        """
+        try:
+            payload = self._fetch_publish_status(access_token, publish_id)
+            status = payload.get("status")
+            # The raw string, not just our verdict: PROCESSING_UPLOAD and
+            # SEND_TO_USER_INBOX both mean "waiting", but only the second one
+            # means the creator can already see the draft.
+            logger.info(
+                "[TIKTOK] inbox status for %s: %s (fail_reason=%s)",
+                publish_id,
+                status,
+                payload.get("fail_reason"),
+            )
+        except Exception:
+            logger.warning(
+                "TikTok publish-status fetch failed for %s; leaving it waiting",
+                publish_id,
+                exc_info=True,
+            )
+            return "waiting"
+        if status == "PUBLISH_COMPLETE":
+            return "published"
+        if status in ("FAILED", "EXPIRED"):
+            return "failed"
+        return "waiting"
 
     def _resolve_video_id(self, access_token: str, post_id: str) -> str | None:
         """Resolve a stored ``platform_post_id`` to a TikTok video ID.

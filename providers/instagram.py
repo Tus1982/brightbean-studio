@@ -77,6 +77,21 @@ INSTAGRAM_MEDIA_INSIGHTS = [
     "shares",
     "total_interactions",
 ]
+# [2026-09-07] A Story is measured with a different ruler, and asking for the feed
+# metrics on one gets nothing back: `likes`, `saved`, `shares` and
+# `total_interactions` are not supported on stories. What a story does have is how
+# many people it reached, how many watched, who wrote back, and how they moved
+# through it (`navigation` — taps forward, taps back, exits), which is the number
+# that says whether the thing was worth watching.
+#
+# ⚠ These numbers die with the story: Meta serves them for 24 hours and then the
+# media is gone. Whatever reads them has to read them the same day.
+INSTAGRAM_STORY_INSIGHTS = [
+    "reach",
+    "views",
+    "replies",
+    "navigation",
+]
 INSTAGRAM_MEDIA_FIELDS = [
     "id",
     "caption",
@@ -342,7 +357,14 @@ class InstagramProvider(SocialProvider):
         """Publish a single image, reel, or story."""
         payload: dict = {}
 
-        if content.text:
+        # A Story has no text field: Instagram's story container rejects
+        # ``caption``. The words are already burnt into the 1080x1920 image, so
+        # the caption is dropped here rather than sent and refused — but it is
+        # said out loud, because a silently dropped caption looks like a bug to
+        # whoever wrote it. [2026-09-07]
+        if content.text and content.post_type == PostType.STORY:
+            logger.info("Instagram story: caption dropped, stories carry no text field")
+        elif content.text:
             payload["caption"] = content.text
 
         # Route on what the asset *is*, not only on which post types name a
@@ -510,17 +532,43 @@ class InstagramProvider(SocialProvider):
 
     def get_post_metrics(self, access_token: str, post_id: str) -> PostMetrics:
         fields = self._get_media_fields(access_token, post_id)
+        # The media itself says what it is; asking a story for feed metrics returns
+        # nothing at all, so the ruler follows the surface.
+        is_story = str(fields.get("media_product_type") or "").upper() == "STORY"
         values, errors = fetch_insights_safe(
             self._request,
             platform=self.platform_name,
             endpoint=f"{BASE_URL}/{post_id}/insights",
             access_token=access_token,
-            metrics=INSTAGRAM_MEDIA_INSIGHTS,
+            metrics=INSTAGRAM_STORY_INSIGHTS if is_story else INSTAGRAM_MEDIA_INSIGHTS,
             endpoint_type="media",
             require_success=True,
         )
         likes = values.get("likes", fields.get("like_count", 0))
         comments = values.get("comments", fields.get("comments_count", 0))
+
+        extra = {
+            "total_interactions": values.get("total_interactions", 0),
+            "raw_fields": fields,
+            "raw_insights": values,
+            "insight_errors": errors,
+            "surface": "story" if is_story else str(fields.get("media_product_type") or "feed").lower(),
+        }
+        if is_story:
+            # A story has no likes and no saves — reporting 0 would read as "nobody
+            # liked it" instead of "that number does not exist here". Its own numbers
+            # travel in `extra`, named as Meta names them.
+            extra["replies"] = values.get("replies", 0)
+            extra["navigation"] = values.get("navigation", 0)
+            return PostMetrics(
+                reach=values.get("reach", 0),
+                likes=0,
+                comments=values.get("replies", 0),
+                saves=0,
+                shares=0,
+                video_views=values.get("views", 0),
+                extra=extra,
+            )
 
         return PostMetrics(
             reach=values.get("reach", 0),
@@ -529,12 +577,7 @@ class InstagramProvider(SocialProvider):
             saves=values.get("saved", 0),
             shares=values.get("shares", 0),
             video_views=values.get("views", 0),
-            extra={
-                "total_interactions": values.get("total_interactions", 0),
-                "raw_fields": fields,
-                "raw_insights": values,
-                "insight_errors": errors,
-            },
+            extra=extra,
         )
 
     def get_account_metrics(self, access_token: str, date_range: tuple[datetime, datetime]) -> AccountMetrics:

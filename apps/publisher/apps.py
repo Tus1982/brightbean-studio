@@ -17,7 +17,9 @@ class PublisherConfig(AppConfig):
         from apps.publisher.tasks import (
             PUBLISH_CONFIRM_INTERVAL_SECONDS,
             PUBLISH_CYCLE_INTERVAL_SECONDS,
+            RECONCILE_AWAITING_CREATOR_INTERVAL_SECONDS,
             confirm_pending_publishes,
+            reconcile_awaiting_creator,
             run_publish_cycle,
         )
 
@@ -33,4 +35,11 @@ class PublisherConfig(AppConfig):
             confirm_pending_publishes,
             repeat=PUBLISH_CONFIRM_INTERVAL_SECONDS,
             verbose_name="confirm_pending_publishes",
+        )
+        # [fork Willy] TikTok inbox uploads wait on a person opening the TikTok
+        # app, not on a machine: ten minutes is plenty.
+        register_recurring_task(
+            reconcile_awaiting_creator,
+            repeat=RECONCILE_AWAITING_CREATOR_INTERVAL_SECONDS,
+            verbose_name="reconcile_awaiting_creator",
         )

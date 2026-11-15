@@ -206,6 +206,35 @@ class CreatePostRequest(Schema):
         default_factory=list,
         description="MediaAsset IDs already uploaded to the workspace's media library. Position-ordered.",
     )
+    post_type: str | None = Field(
+        None,
+        description=(
+            "Which surface to publish on: ``story`` or ``reel``. Omit for a normal "
+            "feed post — the engine then reads the media (image / video / carousel) "
+            "as it always has. Stored as the ``post_type`` hint in the platform "
+            "post's ``platform_extra`` and honoured by the publisher; a platform "
+            "that does not support the surface is rejected here, not at publish "
+            "time. Both surfaces require at least one media asset; a reel requires "
+            "a video."
+        ),
+    )
+    board_id: str | None = Field(
+        None,
+        max_length=64,
+        description=(
+            "Pinterest only: the board the Pin goes to (an id from the account's "
+            "boards). Required for Pinterest — the publisher cannot pin without it — "
+            "and rejected on every other platform. Stored in ``platform_extra``."
+        ),
+    )
+    link_url: str | None = Field(
+        None,
+        max_length=2048,
+        description=(
+            "Pinterest only: the destination link of the Pin (e.g. the product page). "
+            "Stored in ``platform_extra``; the publisher hands it to the provider."
+        ),
+    )
     platform_overrides: list[PlatformOverride] = Field(
         default_factory=list,
         description=(
@@ -259,6 +288,45 @@ class UpdatePostRequest(Schema):
         None,
         description="Set a draft's suggested publish time (UTC). Sending null is a no-op (cannot clear via PATCH).",
     )
+    # [Willy 17/10/2026] Edit the SAME post from a calendar: surface and destinations.
+    post_type: str | None = Field(
+        None,
+        description=(
+            "``post`` (feed: the engine reads the media), ``story`` or ``reel``. Omit to keep each "
+            "platform post's current surface. Validated per target account with the same rule as create."
+        ),
+    )
+    social_account_ids: list[uuid.UUID] | None = Field(
+        None,
+        description=(
+            "The complete set of target accounts for this same post. Children for kept accounts keep "
+            "their id, options, schedule and texts; only missing accounts are added and only unlisted "
+            "ones are removed. Every id must be in the key's allowlist. Omit to keep the destinations."
+        ),
+    )
+    apply_text_to_platforms: bool = Field(
+        False,
+        description=(
+            "When true, each of title / caption / first_comment sent in this request also clears the "
+            "matching per-platform override, so every platform inherits the common text. Default false "
+            "keeps the overrides."
+        ),
+    )
+
+
+#: Fields PATCH /posts/{id} really accepts; exposed on reads as ``editable_fields``.
+PATCH_FIELDS = (
+    "title",
+    "caption",
+    "first_comment",
+    "internal_notes",
+    "media_asset_ids",
+    "scheduled_at",
+    "proposed_publish_at",
+    "post_type",
+    "social_account_ids",
+    "apply_text_to_platforms",
+)
 
 
 class ScheduleRequest(Schema):
@@ -279,6 +347,17 @@ class PlatformPostSummary(Schema):
     published_at: dt.datetime | None
     platform_post_id: str = ""
     publish_error: str = ""
+    # The per-platform choices made in the composer. Exposed because some of
+    # them never reach the platform and are instructions for a person instead:
+    # a TikTok post sent to the creator's drafts carries privacy, interaction
+    # and disclosure settings that whoever finishes the post has to apply by
+    # hand inside the app, and a caller has no other way to read them.
+    platform_extra: dict = {}
+    # Per-platform overrides of the common text. ``None`` = inherits the post's text;
+    # a string (even "") is what this platform publishes instead.
+    platform_specific_title: str | None = None
+    platform_specific_caption: str | None = None
+    platform_specific_first_comment: str | None = None
 
     @field_serializer("scheduled_at", "published_at")
     def _serialize_dt(self, value: dt.datetime | None) -> str | None:
@@ -295,6 +374,10 @@ class PlatformPostSummary(Schema):
             published_at=pp.published_at,
             platform_post_id=pp.platform_post_id or "",
             publish_error=pp.publish_error or "",
+            platform_extra=pp.platform_extra or {},
+            platform_specific_title=pp.platform_specific_title,
+            platform_specific_caption=pp.platform_specific_caption,
+            platform_specific_first_comment=pp.platform_specific_first_comment,
         )
 
 
@@ -310,8 +393,22 @@ class PostResponse(Schema):
     proposed_publish_at: dt.datetime | None
     status: str  # derived aggregate
     platform_posts: list[PlatformPostSummary]
+    media: list[dict] = Field(
+        default_factory=list,
+        description=(
+            "The post's attached media in position order: ``{id, media_type}``. The ids "
+            "are MediaAsset ids of this workspace, reusable in ``media_asset_ids``."
+        ),
+    )
     created_at: dt.datetime
     updated_at: dt.datetime
+    editable_fields: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Fields PATCH /posts/{id} accepts for this post right now. Empty when the post is not "
+            "editable or any platform post is published, publishing or waiting in the creator's drafts."
+        ),
+    )
 
     @field_serializer("scheduled_at", "published_at", "proposed_publish_at", "created_at", "updated_at")
     def _serialize_dt(self, value: dt.datetime | None) -> str | None:
@@ -341,7 +438,16 @@ class PostResponse(Schema):
             children = post.platform_posts.all()
         else:
             children = post.platform_posts.select_related("social_account")
+        # Keep the ordered media prefetch too: a new queryset would discard it
+        # and add one query per post in both REST and MCP list pages.
+        if "media_attachments" in getattr(post, "_prefetched_objects_cache", {}):
+            attachments = sorted(post.media_attachments.all(), key=lambda pm: pm.position)
+        else:
+            attachments = list(post.media_attachments.select_related("media_asset").order_by("position"))
+        from apps.composer.models import PlatformPost as _PlatformPost
+
         platform_posts = [PlatformPostSummary.from_platform_post(pp) for pp in children]
+        sent = any(pp.status in _PlatformPost.PROTECTED_STATUSES or pp.published_at for pp in children)
         return cls(
             id=post.id,
             workspace_id=post.workspace_id,
@@ -354,8 +460,10 @@ class PostResponse(Schema):
             proposed_publish_at=post.proposed_publish_at,
             status=post.status,
             platform_posts=platform_posts,
+            media=[{"id": str(pm.media_asset_id), "media_type": pm.media_asset.media_type} for pm in attachments],
             created_at=post.created_at,
             updated_at=post.updated_at,
+            editable_fields=list(PATCH_FIELDS) if post.is_editable and not sent else [],
         )
 
 

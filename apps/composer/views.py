@@ -36,6 +36,7 @@ from apps.members.models import WorkspaceMembership
 from apps.social_accounts.models import SocialAccount
 from apps.workspaces.models import Workspace
 from providers import is_video_only, requires_media
+from providers.tiktok import VALID_POST_MODES as TIKTOK_POST_MODES
 from providers.tiktok import VALID_PRIVACY_LEVELS as TIKTOK_PRIVACY_LEVELS
 
 from .forms import ContentCategoryForm, PostForm
@@ -132,6 +133,21 @@ def _remove_deselected_platform_posts(request, post, selected_ids):
     if scope:
         qs = qs.filter(social_account_id=scope)
     qs.exclude(status__in=PlatformPost.PROTECTED_STATUSES).delete()
+
+
+def _tiktok_default_post_mode(workspace) -> str:
+    """Route a TikTok post takes when nobody has chosen one.
+
+    Same cascade the publisher uses (workspace -> org -> deployment default),
+    so the composer preselects exactly what would happen at publish time.
+    """
+    try:
+        from apps.settings_manager.helpers import get_setting
+
+        value = get_setting(workspace.id, "publishing.tiktok_post_mode", default="INBOX")
+    except Exception:
+        return "INBOX"
+    return str(value or "INBOX").upper()
 
 
 def _scoped_platform_post_ids(request, post):
@@ -320,18 +336,28 @@ def _sync_platform_posts(request, post, workspace, initial_status=None):
                 "cover_image_asset_id": request.POST.get(f"pin_cover_image_asset_id_{acc_id}", "").strip() or None,
             }
 
-        elif account.platform == "tiktok" and f"tiktok_privacy_level_{acc_id}" in request.POST:
+        elif account.platform == "tiktok" and f"tiktok_post_mode_{acc_id}" in request.POST:
             # Only rebuild extras when the TikTok panel was part of the form,
             # so non-composer saves can't wipe a previously chosen privacy level.
+            saved_extra = pp.platform_extra or {}
+            post_mode = request.POST.get(f"tiktok_post_mode_{acc_id}", "").strip().upper()
+            if post_mode not in TIKTOK_POST_MODES:
+                post_mode = saved_extra.get("post_mode") or _tiktok_default_post_mode(workspace)
+
+            # Both modes keep the same settings. In INBOX mode they never reach
+            # TikTok — the provider sends the video alone — but they are what the
+            # person who finishes the post inside the app has to apply, so they
+            # are carried to them rather than thrown away.
             privacy = request.POST.get(f"tiktok_privacy_level_{acc_id}", "").strip()
             if privacy not in TIKTOK_PRIVACY_LEVELS:
                 # An empty/invalid submit (required-validation bypassed) must
                 # not wipe a previously saved choice.
-                privacy = (pp.platform_extra or {}).get("privacy_level", "")
+                privacy = saved_extra.get("privacy_level", "")
             # Comment / Duet / Stitch are independent interaction settings —
             # TikTok's UX guidelines require a separate toggle per interaction,
             # each greyed out on its own when the creator disabled it.
             extra = {
+                "post_mode": post_mode,
                 "disable_comment": request.POST.get(f"tiktok_allow_comment_{acc_id}") != "true",
                 "disable_duet": request.POST.get(f"tiktok_allow_duet_{acc_id}") != "true",
                 "disable_stitch": request.POST.get(f"tiktok_allow_stitch_{acc_id}") != "true",
@@ -831,6 +857,8 @@ def compose(request, workspace_id, post_id=None):
         "social_accounts": social_accounts,
         "selected_account_ids": [str(aid) for aid in selected_account_ids],
         "platform_extras": platform_extras,
+        # Preselects the TikTok route for a post that has never been saved.
+        "tiktok_default_post_mode": _tiktok_default_post_mode(workspace),
         "media_attachments": media_attachments,
         "media_items": media_items,
         "char_limits": char_limits,

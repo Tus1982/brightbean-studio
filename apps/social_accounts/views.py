@@ -346,6 +346,7 @@ def oauth_callback(request, platform):
             PlatformCredential.Platform.FACEBOOK,
             PlatformCredential.Platform.INSTAGRAM,
             PlatformCredential.Platform.LINKEDIN_COMPANY,
+            PlatformCredential.Platform.GOOGLE_BUSINESS,
         ) and hasattr(provider, "get_user_pages"):
             tokens, promoted = promote_meta_user_token(provider, platform, tokens)
             pages = provider.get_user_pages(tokens.access_token)
@@ -373,6 +374,9 @@ def oauth_callback(request, platform):
                         # long-lived user token does not expire. On the fallback
                         # path it is the short-lived expiry, which the account
                         # must carry to be seen as expiring at all.
+                        # [fork Willy] Google Business: one user token shared by
+                        # every location; it expires in an hour and must be
+                        # refreshed, so its expiry is stored on each account.
                         "expires_in": None if promoted else tokens.expires_in,
                         "user_expires_at": (
                             (timezone.now() + timedelta(seconds=tokens.expires_in)).isoformat()
@@ -384,7 +388,12 @@ def oauth_callback(request, platform):
                 }
                 return redirect("social_accounts:select_account")
             else:
-                if platform == PlatformCredential.Platform.LINKEDIN_COMPANY:
+                if platform == PlatformCredential.Platform.GOOGLE_BUSINESS:
+                    warning = (
+                        "No Google Business Profile locations were found for this Google account. "
+                        "Sign in with the account that manages the store listings, then reconnect."
+                    )
+                elif platform == PlatformCredential.Platform.LINKEDIN_COMPANY:
                     warning = (
                         "No LinkedIn Company Pages were found for your account. "
                         "Only Company Pages you administer can be connected — "
@@ -506,6 +515,10 @@ def select_account(request):
                 )
                 continue
             access_token = resolve_page_account_token(page, platform, user_tokens.get("access_token", ""))
+            if not access_token and platform == "google_business":
+                # [fork Willy] Google Business locations carry no token of their
+                # own: every location is driven by the shared user token.
+                access_token = user_tokens.get("access_token", "")
             if not access_token:
                 messages.error(
                     request,
@@ -528,7 +541,9 @@ def select_account(request):
                 refresh_token=user_tokens.get("refresh_token"),
                 expires_in=user_tokens.get("expires_in"),
                 facebook_user_access_token=user_tokens.get("access_token", "") if platform == "instagram" else None,
-                facebook_user_token_expires_at=user_tokens.get("user_expires_at"),
+                facebook_user_token_expires_at=(
+                    user_tokens.get("user_expires_at") if platform != "google_business" else None
+                ),
                 # Instagram-via-Facebook receives its webhooks through the
                 # linked Page, so remember which Page to subscribe.
                 webhook_target_id=page.get("page_id", ""),
