@@ -12,6 +12,7 @@ time. What these tests hold still:
 """
 
 import json
+from datetime import timedelta
 
 import pytest
 from django.core.files.uploadedfile import SimpleUploadedFile
@@ -159,11 +160,32 @@ class TestPinterestBoard:
         pp = PlatformPost.objects.get(social_account=pinterest_account)
         assert pp.platform_extra == {"board_id": "board-42", "link_url": "https://willybesmart.com/products/x"}
 
-    def test_pinterest_without_board_is_refused(self, client_for, pinterest_account, image_asset):
+    def test_pinterest_draft_without_board_is_accepted(self, client_for, pinterest_account, image_asset):
+        """Upstream's rule since the 15/11/2026 re-alignment: the board can be set later."""
         client = client_for(pinterest_account)
         r = _create(client, pinterest_account, title="Un Pin", media_asset_ids=[str(image_asset.id)])
-        assert r.status_code == 422
-        assert "board_id" in r.content.decode()
+        assert r.status_code == 201, r.content
+        pp = PlatformPost.objects.get(social_account=pinterest_account)
+        assert "board_id" not in (pp.platform_extra or {})
+
+    def test_a_scheduled_pin_with_its_board_passes_the_publishability_gate(
+        self, client_for, pinterest_account, image_asset
+    ):
+        """The board handed to the API must reach the gate, or every API pin is refused."""
+        client = client_for(pinterest_account)
+        r = _create(
+            client,
+            pinterest_account,
+            title="Un Pin",
+            media_asset_ids=[str(image_asset.id)],
+            board_id="board-42",
+            action="schedule",
+            scheduled_at=(timezone.now() + timedelta(days=1)).isoformat(),
+        )
+        assert r.status_code == 201, r.content
+        pp = PlatformPost.objects.get(social_account=pinterest_account)
+        assert pp.status == PlatformPost.Status.SCHEDULED
+        assert pp.platform_extra["board_id"] == "board-42"
 
     def test_pinterest_without_media_is_refused(self, client_for, pinterest_account):
         client = client_for(pinterest_account)

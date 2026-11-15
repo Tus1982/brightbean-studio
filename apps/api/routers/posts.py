@@ -346,11 +346,13 @@ def create(request, payload: CreatePostRequest):
     board_id = (payload.board_id or "").strip()
     link_url = (payload.link_url or "").strip()
     if social_account.platform == "pinterest":
-        if not board_id:
-            raise HttpError(422, "board_id is required for Pinterest.")
+        # No board is fine on a draft: upstream's publishability gate
+        # (``composer.services.publish_blocker``) refuses to *schedule* a pin
+        # without one, and the board can still be picked in the composer.
         if not payload.media_asset_ids:
             raise HttpError(422, "A Pin needs at least one media asset.")
-        pin_extra["board_id"] = board_id
+        if board_id:
+            pin_extra["board_id"] = board_id
         if link_url:
             pin_extra["link_url"] = link_url
     elif social_account.platform == "google_business" and not board_id:

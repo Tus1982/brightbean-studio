@@ -175,12 +175,14 @@ def create_post(
             raise ValueError(f"Media asset(s) not found in workspace {workspace.id}: {missing}")
 
     if status == "scheduled":
-        # A new post has no platform_extra, so a Pinterest pin has no board
-        # yet and is refused here: it can be created as a draft, given a
-        # board in the composer, and scheduled from there.
+        # A pin with no board is refused here: it can be created as a draft,
+        # given a board in the composer, and scheduled from there.
+        # [fork Willy] The Agent API may hand the board in ``platform_extra``
+        # (``board_id``), so the gate reads it instead of assuming it is empty.
         reason = publish_blocker(
             social_account,
             media_types=usable_media_types(asset_map.values()),
+            platform_extra=platform_extra,
         )
         if reason:
             raise ValueError(reason)
