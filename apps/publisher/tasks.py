@@ -12,6 +12,9 @@ PUBLISH_CYCLE_INTERVAL_SECONDS = 15
 # at any moment, so a minute is frequent enough to feel immediate without
 # polling TikTok harder than it wants.
 PUBLISH_CONFIRM_INTERVAL_SECONDS = 60
+# [fork Willy] TikTok inbox drafts are settled by a person in the TikTok app,
+# not by a machine: ten minutes is plenty (``reconcile_awaiting_creator``).
+RECONCILE_AWAITING_CREATOR_INTERVAL_SECONDS = 600
 
 
 @background(schedule=0)
