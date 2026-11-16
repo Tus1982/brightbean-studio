@@ -23,3 +23,5 @@ Questa modifica deve essere disponibile nel BrightBean usato da Willy prima di u
 ## 16 novembre — fixture della suite completa
 
 La prima CI completa ha superato 2.811 test esistenti ma non ha trovato workspace e le altre fixture nei 39 nuovi test: la registrazione come plugin di un modulo già raccolto dipendeva dall'ordine della raccolta. Le fixture canoniche dell'editor sono ora esposte direttamente nel modulo delle nuove prove. Verificati sia l'esecuzione isolata dei 39 test sia i 69 test insieme all'editor, senza cambiare l'API produttiva. Nessun merge o deploy eseguito.
+
+Durante il rilascio è emerso anche un test preesistente della conservazione YouTube dipendente dall'ora: preparava date UTC, mentre il limite produttivo usa il giorno America/Los_Angeles. La prova usa ora lo stesso calendario dei report ed è parametrizzata su mezzanotte e mezzogiorno UTC. Codice produttivo e durata di conservazione invariati. I 103 test locali (YouTube, operazioni bozze ed editor) passano; il nuovo giro CI PostgreSQL deve concludersi prima del merge.
