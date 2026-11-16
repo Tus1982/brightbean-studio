@@ -4,6 +4,7 @@ import json
 from datetime import timedelta
 from io import StringIO
 from unittest.mock import Mock, patch
+from zoneinfo import ZoneInfo
 
 import pytest
 from django.core.management import call_command
@@ -233,15 +234,19 @@ def test_a_grant_that_no_longer_reaches_the_channel_stops_the_inbox(channel):
     inbox_provider.get_messages.assert_not_called()
 
 
-def test_history_keeps_180_days_and_drops_arbitrary_old_response_payloads(channel):
-    now = timezone.now()
+@pytest.mark.parametrize("utc_hour", [0, 12])
+def test_history_keeps_180_days_and_drops_arbitrary_old_response_payloads(channel, utc_hour):
+    now = timezone.now().replace(hour=utc_hour, minute=0, second=0, microsecond=0)
+    # YouTube reports use Pacific dates. At UTC midnight their current report
+    # day is still yesterday; UTC dates put the old sample on the retained edge.
+    report_day = now.astimezone(ZoneInfo("America/Los_Angeles")).date()
     old = AccountInsightsSnapshot.objects.create(
-        social_account=channel, metric_key="views", date=now.date() - timedelta(days=181), value=4
+        social_account=channel, metric_key="views", date=report_day - timedelta(days=181), value=4
     )
     retained = AccountInsightsSnapshot.objects.create(
         social_account=channel,
         metric_key="views",
-        date=now.date() - timedelta(days=179),
+        date=report_day - timedelta(days=179),
         value=3,
         raw={"source": "youtube_analytics", "copied_profile": "Old"},
     )
