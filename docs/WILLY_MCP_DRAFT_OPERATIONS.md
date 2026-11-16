@@ -19,3 +19,7 @@ Risposta: id, esito, colonna finale proposta, dry_run, richiesto_da, quando. L'a
 Verifica: 69 test passati (39 nuovi e 30 dell'editor esistente), lint Ruff e diff check. I test Django sono stati eseguiti su SQLite in memoria con i modelli reali; simulano anche il cambio di stato fra lettura e lock e il rollback dell'audit. Il comportamento dei lock concorrenti PostgreSQL richiede il normale ambiente CI PostgreSQL. Nessun provider, dato operativo o servizio Railway è stato modificato.
 
 Questa modifica deve essere disponibile nel BrightBean usato da Willy prima di utilizzare gli strumenti editoriali del nuovo connettore. Il connettore rifiuta esplicitamente la scrittura se la rotta manca e non ripiega sul PATCH generico, che accetta anche post programmati.
+
+## 16 novembre — fixture della suite completa
+
+La prima CI completa ha superato 2.811 test esistenti ma non ha trovato workspace e le altre fixture nei 39 nuovi test: la registrazione come plugin di un modulo già raccolto dipendeva dall'ordine della raccolta. Le fixture canoniche dell'editor sono ora esposte direttamente nel modulo delle nuove prove. Verificati sia l'esecuzione isolata dei 39 test sia i 69 test insieme all'editor, senza cambiare l'API produttiva. Nessun merge o deploy eseguito.

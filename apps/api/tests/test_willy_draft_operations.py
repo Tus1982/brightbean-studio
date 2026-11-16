@@ -6,12 +6,19 @@ from unittest.mock import patch
 import pytest
 from django.utils import timezone
 
-from apps.api.tests.test_calendar_edit_destinations import _account
+from apps.api.tests import test_calendar_edit_destinations as calendar_fixtures
 from apps.api_keys.models import ApiKeyAuditLog
 from apps.composer.models import PlatformPost, Post
 from apps.publisher.models import PublishLog
 
-pytest_plugins = ["apps.api.tests.test_calendar_edit_destinations"]
+# Bind the shared fixtures in this module too: pytest may already have collected
+# their source module before this test file during the full suite.
+user = calendar_fixtures.user
+organization = calendar_fixtures.organization
+workspace = calendar_fixtures.workspace
+owner = calendar_fixtures.owner
+ig = calendar_fixtures.ig
+client_for = calendar_fixtures.client_for
 pytestmark = pytest.mark.django_db
 
 
@@ -129,7 +136,7 @@ def test_audit_failure_rolls_back(workspace, ig, client_for):
 def test_permissions_and_foreign_children_are_checked(workspace, ig, client_for):
     post, _ = make_post(workspace, ig)
     assert call(client_for(ig, permissions=[]), post, "archive", motivo="Test").status_code == 403
-    foreign = _account(workspace, "facebook")
+    foreign = calendar_fixtures._account(workspace, "facebook")
     PlatformPost.objects.create(post=post, social_account=foreign, status="draft")
     assert call(client_for(ig), post, "delete", motivo="Test").status_code == 404
     assert Post.objects.filter(pk=post.pk).exists()
