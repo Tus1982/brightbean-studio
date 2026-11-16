@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import uuid
+
 from ninja import Router
 
 from apps.api.limits import enforce_http_rate_limits
@@ -57,3 +59,27 @@ def pinterest_boards(request, account_id: str):
         raise HttpError(502, "Failed to fetch boards") from exc
     log_audit_entry(request, action="accounts.pinterest_boards", target_id=account.id, status_code=200)
     return {"boards": [{"id": b.get("id"), "name": b.get("name")} for b in boards]}
+
+
+@router.get("/{account_id}/google/reviews", summary="Read the selected Google store's rating and reviews")
+def google_reviews(request, account_id: uuid.UUID, limite: int = 20):
+    from ninja.errors import HttpError
+
+    from apps.analytics.tasks import _resolve_provider
+    from apps.api.routers.posts import _require_perm, _resolve_account
+
+    enforce_http_rate_limits(request, is_write=False)
+    _require_perm(request, "view_analytics")
+    account = _resolve_account(request, account_id)
+    if account.platform != "google_business":
+        raise HttpError(422, "A Google Business store is required.")
+    try:
+        provider = _resolve_provider(account)
+        data = provider.get_reviews(account.oauth_access_token, limite=limite)
+    except Exception as exc:
+        # No token, raw platform response or customer text in error messages.
+        raise HttpError(
+            502, "Google reviews unavailable: verify business.manage permission, selected location and API access."
+        ) from exc
+    log_audit_entry(request, action="accounts.google_reviews", target_id=account.id, status_code=200)
+    return data
