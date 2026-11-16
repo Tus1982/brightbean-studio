@@ -283,7 +283,8 @@ class TestAccountAnalytics:
         r = client_with_token.get(f"/api/v1/analytics/accounts/{instagram_account.id}")
         assert r.status_code == 200
         body = r.json()
-        assert body["analytics_available"] is True
+        assert body["analytics_available"] is False
+        assert body["unavailable_reason"] and body["hero_metrics"] == []
         # Hero metrics still listed (per platform catalog) but with zero values,
         # and every day unreported (null) rather than a reported zero.
         for metric in body["hero_metrics"]:

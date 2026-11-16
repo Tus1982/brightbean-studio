@@ -286,6 +286,15 @@ def _account_metrics_to_dict(metrics, platform: str) -> dict[str, float]:
     """
     from .metrics import PLATFORM_METRICS
 
+    # These APIs report individual fields (including zero), never fill absent metrics.
+    if platform in {"google_business", "pinterest"}:
+        provided = (getattr(metrics, "extra", {}) or {}).get("metrics")
+        if provided is not None:
+            return {
+                key: float(value)
+                for key, value in provided.items()
+                if key in PLATFORM_METRICS[platform] and value is not None
+            }
     out: dict[str, float] = {}
     for src, key in (
         ("impressions", "impressions"),

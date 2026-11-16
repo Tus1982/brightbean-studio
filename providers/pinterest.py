@@ -9,8 +9,9 @@ import time
 from urllib.parse import urlencode
 
 from .base import SocialProvider
-from .exceptions import OAuthError, PublishError
+from .exceptions import APIError, OAuthError, PublishError
 from .types import (
+    AccountMetrics,
     AccountProfile,
     AuthType,
     MediaType,
@@ -327,6 +328,32 @@ class PinterestProvider(SocialProvider):
     # ------------------------------------------------------------------
     # Analytics
     # ------------------------------------------------------------------
+
+    def get_account_metrics(self, access_token, date_range):
+        body = self._request(
+            "GET",
+            f"{API_BASE}/user_account/analytics",
+            access_token=access_token,
+            params={
+                "start_date": date_range[0].date().isoformat(),
+                "end_date": date_range[1].date().isoformat(),
+                "metric_types": "IMPRESSION,PIN_CLICK,SAVE,OUTBOUND_CLICK",
+            },
+        ).json()
+        summary = (body.get("all") or {}).get("summary_metrics") or {}
+        metrics = {
+            key: summary[src]
+            for src, key in (
+                ("IMPRESSION", "impressions"),
+                ("PIN_CLICK", "clicks"),
+                ("SAVE", "saves"),
+                ("OUTBOUND_CLICK", "outbound"),
+            )
+            if summary.get(src) is not None
+        }
+        if len(metrics) != 4:
+            raise APIError("Pinterest returned incomplete account metric data", platform=self.platform_name)
+        return AccountMetrics(followers=None, impressions=metrics.get("impressions", 0), extra={"metrics": metrics})
 
     def get_post_metrics(self, access_token: str, post_id: str) -> PostMetrics:
         resp = self._request(
