@@ -75,6 +75,13 @@ def build_account_analytics(account: SocialAccount, days: int) -> AccountAnalyti
         last_captured_at=bundle["max_captured_at"],
         have_last_captured_at=True,
     )
+    reason = None
+    if captured_at is None:
+        reason = (
+            "TikTok account analytics are intentionally unavailable: only per-video metrics with video.list are supported."
+            if account.platform == "tiktok"
+            else "Not read: no snapshot in the requested window. Check platform analytics permissions and sync logs."
+        )
     hero = [
         DerivedMetricResponse.from_derived(card["metric"], card["label"], card["derived"])
         for card in hero_cards(account, days, bundle=bundle)
@@ -104,9 +111,9 @@ def build_account_analytics(account: SocialAccount, days: int) -> AccountAnalyti
         account_name=account.account_name,
         connection_status=account.connection_status,
         days=days,
-        analytics_available=True,
-        unavailable_reason=None,
-        hero_metrics=hero,
+        analytics_available=captured_at is not None,
+        unavailable_reason=reason,
+        hero_metrics=hero if captured_at is not None else [],
         engagement=engagement,
         follower_growth=growth_response,
         captured_at=captured_at,

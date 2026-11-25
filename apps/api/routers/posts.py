@@ -95,17 +95,24 @@ def draft_operation(request, post_id: uuid.UUID, payload: DraftOperationRequest)
 
     enforce_http_rate_limits(request, is_write=not payload.dry_run)
     _require_perm(request, "create_posts")
-    if payload.operation not in {"archive", "delete", "move", "edit"}:
+    if payload.operation not in {"archive", "archive_error", "archive_test", "delete", "move", "edit"}:
         raise HttpError(422, "Unknown draft operation.")
-    if payload.dry_run and payload.operation not in {"archive", "delete"}:
+    if payload.dry_run and payload.operation not in {"archive", "archive_error", "archive_test", "delete"}:
         raise HttpError(422, "dry_run is supported for archive and delete.")
-    if payload.operation in {"archive", "delete"} and not payload.motivo.strip():
+    if payload.operation in {"archive", "archive_error", "archive_test", "delete"} and not payload.motivo.strip():
         raise HttpError(422, "motivo is required.")
     columns = {"IDEAS", "IN_PRODUCTION", "TO_APPROVE", "ANALYSIS"}
     if payload.operation == "move" and payload.column not in columns:
         raise HttpError(422, "Only IDEAS / IN_PRODUCTION / TO_APPROVE / ANALYSIS are allowed.")
     changes = payload.changes.model_dump(exclude_none=True, exclude_unset=True) if payload.changes else {}
-    if set(changes) - {"title", "caption", "internal_notes", "proposed_publish_at", "social_account_ids"}:
+    if set(changes) - {
+        "title",
+        "caption",
+        "internal_notes",
+        "proposed_publish_at",
+        "social_account_ids",
+        "media_asset_ids",
+    }:
         raise HttpError(422, "Only draft text, proposed date and destinations may be edited.")
     if payload.operation != "edit" and changes:
         raise HttpError(422, "changes are only accepted for edit.")
@@ -119,22 +126,26 @@ def draft_operation(request, post_id: uuid.UUID, payload: DraftOperationRequest)
         children = list(PlatformPost.objects.select_for_update().filter(post=post))
         # Recheck workspace and every allowlisted child after taking locks.
         _get_workspace_post(request, post_id)
-        if (
-            post.published_at
-            or not children
-            or any(
-                pp.status not in {"draft", "changes_requested", "rejected"}
-                or pp.published_at
-                or pp.scheduled_at
-                or pp.platform_post_id
-                for pp in children
-            )
-            or post.scheduled_at
-        ):
+        exceptional = payload.operation in {"archive_error", "archive_test"}
+        allowed = {"draft", "changes_requested", "rejected"}
+        if payload.operation == "archive_error":
+            allowed |= {"failed"}
+            if not any(pp.status == "failed" for pp in children):
+                raise HttpError(409, "archive_error requires a failed child.")
+        if payload.operation == "archive_test":
+            allowed |= {"failed", "approved", "pending_review", "pending_client", "on_hold", "awaiting_creator"}
+        if post.published_at or not children or any(pp.status not in allowed or pp.published_at for pp in children):
+            raise HttpError(409, "Published, scheduled or publishing rows cannot be archived or edited.")
+        if not exceptional and (post.scheduled_at or any(pp.scheduled_at or pp.platform_post_id for pp in children)):
             raise HttpError(409, "Only never-published, unscheduled drafts may be changed.")
-        # Even a reset-to-draft row with a previous publishing attempt is not a test draft.
-        if PublishLog.objects.filter(platform_post__in=children).exists():
-            raise HttpError(409, "A publishing attempt exists: operation refused.")
+        # A successful remote publication remains protected even after a manual reset.
+        logs = PublishLog.objects.filter(platform_post__in=children)
+        if (not exceptional and logs.exists()) or (
+            exceptional
+            and logs.filter(status_code__gte=200, status_code__lt=300).exists()
+            and not all(pp.status == "awaiting_creator" for pp in children)
+        ):
+            raise HttpError(409, "A successful or uncertain publishing attempt exists: review first.")
         current = "IN_PRODUCTION"
         for line in post.internal_notes.splitlines():
             if line.startswith(WILLY_EDITORIAL):
@@ -142,7 +153,13 @@ def draft_operation(request, post_id: uuid.UUID, payload: DraftOperationRequest)
                     current = json.loads(line[len(WILLY_EDITORIAL) :])["column"]
                 except (ValueError, KeyError, TypeError):
                     raise HttpError(409, "Invalid editorial marker: review the draft first.") from None
-        column = {"archive": "ARCHIVE", "delete": "DELETED", "move": payload.column}.get(payload.operation, current)
+        column = {
+            "archive": "ARCHIVE",
+            "archive_error": "ARCHIVE",
+            "archive_test": "ARCHIVE",
+            "delete": "DELETED",
+            "move": payload.column,
+        }.get(payload.operation, current)
         now = timezone.now().isoformat()
         result = {
             "id": str(post_id),

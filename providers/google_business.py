@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import logging
+import re
+from datetime import date, datetime
 from urllib.parse import urlencode
 
 from .base import SocialProvider
 from .exceptions import APIError, OAuthError, PublishError
 from .types import (
+    AccountMetrics,
     AccountProfile,
     AuthType,
     MediaType,
@@ -282,36 +285,96 @@ class GoogleBusinessProvider(SocialProvider):
     # ------------------------------------------------------------------
 
     def get_profile(self, access_token: str) -> AccountProfile:
-        """Fetch the Google Business account and primary location info."""
+        """Read the selected store only; never rename anything on Google."""
         account_id = self._get_account_id(access_token)
-
-        resp = self._request(
-            "GET",
-            f"{BUSINESS_INFO_API}/{account_id}/locations",
-            access_token=access_token,
-            params={"readMask": LOCATION_READ_MASK, "pageSize": 100},
-        )
-        data = resp.json()
-        locations = data.get("locations", [])
-
-        if locations:
-            loc = locations[0]
-            name = loc.get("title", loc.get("name", ""))
-            address_obj = loc.get("storefrontAddress", {})
-            address_lines = address_obj.get("addressLines", [])
-            address = ", ".join(address_lines) if address_lines else ""
-            phone = loc.get("phoneNumbers", {}).get("primaryPhone", "")
-            return AccountProfile(
-                platform_id=f"{account_id}/{loc['name']}" if loc.get("name") else account_id,
-                name=name,
-                handle=None,
-                extra={"address": address, "phone": phone},
-            )
-
+        location_id = self._get_location_id(access_token, account_id)
+        location = location_id[location_id.index("locations/") :]
+        loc = self._request(
+            "GET", f"{BUSINESS_INFO_API}/{location}", access_token=access_token, params={"readMask": LOCATION_READ_MASK}
+        ).json()
+        if loc.get("name") != location:
+            raise APIError("Google returned no selected location data", platform=self.platform_name)
+        address_obj = loc.get("storefrontAddress") or {}
+        address = ", ".join(p for p in [*address_obj.get("addressLines", []), address_obj.get("locality", "")] if p)
+        title = loc.get("title") or location
         return AccountProfile(
-            platform_id=account_id,
-            name=account_id,
+            platform_id=location_id,
+            name=f"{title} - {address}" if address else title,
+            extra={
+                "address": address,
+                "locality": address_obj.get("locality"),
+                "phone": (loc.get("phoneNumbers") or {}).get("primaryPhone", ""),
+            },
         )
+
+    def _selected_location(self):
+        location = str(self.credentials.get("location_id") or "")
+        if not re.fullmatch(r"accounts/[^/]+/locations/[^/]+", location):
+            raise APIError("Selected Google location_id missing or invalid", platform=self.platform_name)
+        return location
+
+    def get_reviews(self, access_token: str, limite: int = 20):
+        """One bounded page of reviews and the platform's overall rating."""
+        limit = max(1, min(int(limite), 50))
+        location = self._selected_location()
+        body = self._request(
+            "GET",
+            f"{POSTS_API}/{location}/reviews",
+            access_token=access_token,
+            params={"pageSize": limit, "orderBy": "updateTime desc"},
+        ).json()
+        if not isinstance(body, dict) or not any(k in body for k in ("reviews", "totalReviewCount")):
+            raise APIError("Google returned no review data", platform=self.platform_name)
+        return {
+            "location_id": location,
+            "average_rating": body.get("averageRating"),
+            "total_reviews": body.get("totalReviewCount"),
+            "reviews": body.get("reviews", [])[:limit],
+            "limite": limit,
+            "troncato": bool(body.get("nextPageToken")) or len(body.get("reviews", [])) > limit,
+        }
+
+    def get_account_metrics(self, access_token: str, date_range: tuple[datetime, datetime]) -> AccountMetrics:
+        """Business Profile Performance API: actual daily store visits and website clicks."""
+        location = self._selected_location().split("/", 2)[2]
+        requested = [
+            "BUSINESS_IMPRESSIONS_DESKTOP_MAPS",
+            "BUSINESS_IMPRESSIONS_DESKTOP_SEARCH",
+            "BUSINESS_IMPRESSIONS_MOBILE_MAPS",
+            "BUSINESS_IMPRESSIONS_MOBILE_SEARCH",
+            "WEBSITE_CLICKS",
+        ]
+        params = {"dailyMetrics": requested}
+        for key, instant in zip(("start_date", "end_date"), date_range, strict=True):
+            for part in ("year", "month", "day"):
+                params[f"dailyRange.{key}.{part}"] = getattr(instant, part)
+        body = self._request(
+            "GET",
+            f"https://businessprofileperformance.googleapis.com/v1/{location}:fetchMultiDailyMetricsTimeSeries",
+            access_token=access_token,
+            params=params,
+        ).json()
+        metrics: dict[str, int] = {}
+        observed = set()
+        for group in body.get("multiDailyMetricTimeSeries", []):
+            for series in group.get("dailyMetricTimeSeries", []):
+                metric = series.get("dailyMetric")
+                if metric not in requested:
+                    continue
+                values = []
+                for row in (series.get("timeSeries") or {}).get("datedValues", []):
+                    day = date(**row["date"])
+                    if date_range[0].date() <= day <= date_range[1].date():
+                        values.append(int(row.get("value", 0)))
+                if values:
+                    observed.add(metric)
+                    key = "clicks" if metric == "WEBSITE_CLICKS" else "impressions"
+                    metrics[key] = metrics.get(key, 0) + sum(values)
+        if observed != set(requested):
+            raise APIError(
+                "Google returned no daily metric data (possibly not finalized yet)", platform=self.platform_name
+            )
+        return AccountMetrics(followers=None, impressions=metrics.get("impressions", 0), extra={"metrics": metrics})
 
     # ------------------------------------------------------------------
     # Publishing
